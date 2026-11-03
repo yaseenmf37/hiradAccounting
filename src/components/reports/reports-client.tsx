@@ -28,7 +28,7 @@ import persian_fa from "react-date-object/locales/persian_fa";
 import gregorian from "react-date-object/calendars/gregorian";
 import DateObject from "react-date-object";
 
-import type { CurrencyUnit } from "@/generated/prisma/client";
+import type { CurrencyUnit } from "@prisma/client";
 import {
   formatCurrency,
   getCurrencyLabel,

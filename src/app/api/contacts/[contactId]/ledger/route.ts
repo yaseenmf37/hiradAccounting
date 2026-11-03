@@ -5,7 +5,7 @@ import {
   InvoiceType,
   PaymentStatus,
   PaymentType,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 

@@ -3,7 +3,7 @@ import {
   ExpenseCategory,
   ExpenseStatus,
   PaymentMethod,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";

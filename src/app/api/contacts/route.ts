@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { ContactType } from "@/generated/prisma/client";
+import { ContactType } from "@prisma/client";
 
 async function authorize() {
   const user = await getCurrentUser();

@@ -1,5 +1,5 @@
 
-import type { CurrencyUnit } from "@/generated/prisma/client";
+import type { CurrencyUnit } from "@prisma/client";
 
 const RIAL_PER_TOMAN = 10;
 

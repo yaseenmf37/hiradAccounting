@@ -5,7 +5,7 @@ import {
   PaymentMethod,
   PaymentStatus,
   PaymentType,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth";
 import { toRial } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";

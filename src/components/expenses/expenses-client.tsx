@@ -22,7 +22,7 @@ import {
   ExpenseCategory,
   PaymentMethod,
   ExpenseStatus,
-} from "@/generated/prisma/client";
+} from "@prisma/client";
 
 type CurrencyUnit = "RIAL" | "TOMAN";
 
