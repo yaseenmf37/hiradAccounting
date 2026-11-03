@@ -1,0 +1,297 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                 String    @id @default(cuid())
+  username           String    @unique
+  passwordHash       String
+  fullName           String
+  role               UserRole  @default(BUSINESS_OWNER)
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  business           Business? @relation("BusinessOwner")
+  sessions           Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Business {
+  id           String              @id @default(cuid())
+  name         String
+  phone        String?
+  isActive     Boolean             @default(true)
+  ownerId      String              @unique
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  currencyUnit CurrencyUnit        @default(TOMAN)
+  owner        User                @relation("BusinessOwner", fields: [ownerId], references: [id])
+  contacts     Contact[]
+  expenses     Expense[]
+  movements    InventoryMovement[]
+  invoices     Invoice[]
+  payments     Payment[]
+  products     Product[]
+}
+
+model Category {
+  id         String    @id @default(cuid())
+  businessId String
+  name       String
+  products   Product[]
+
+  @@unique([businessId, name])
+  @@index([businessId])
+}
+
+model Product {
+  id            String              @id @default(cuid())
+  businessId    String
+  categoryId    String?
+  name          String
+  sku           String?
+  unit          String              @default("عدد")
+  averageCost   Decimal             @default(0) @db.Decimal(30, 9)
+  inventoryValue BigInt             @default(0)
+  purchasePrice BigInt              @default(0)
+  salePrice     BigInt              @default(0)
+  stock         Decimal             @default(0) @db.Decimal(18, 3)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  barcode       String?
+  isActive      Boolean             @default(true)
+  minStock      Decimal             @default(0) @db.Decimal(18, 3)
+  movements     InventoryMovement[]
+  invoiceItems  InvoiceItem[]
+  business      Business            @relation(fields: [businessId], references: [id])
+  category      Category?           @relation(fields: [categoryId], references: [id])
+
+  @@unique([businessId, sku])
+  @@unique([businessId, barcode])
+  @@index([businessId, name])
+  @@index([businessId, isActive, name])
+}
+
+model Contact {
+  id          String        @id @default(cuid())
+  businessId  String
+  name        String
+  type        ContactType   @default(BOTH)
+  phone       String?
+  email       String?
+  address     String?
+  description String?
+  isActive    Boolean       @default(true)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  business    Business      @relation(fields: [businessId], references: [id])
+  invoices    Invoice[]
+  payments    Payment[]
+
+  @@index([businessId, name])
+  @@index([businessId, type, isActive])
+}
+
+enum ContactType {
+  CUSTOMER
+  SUPPLIER
+  BOTH
+}
+
+model Invoice {
+  id            String              @id @default(cuid())
+  businessId    String
+  contactId     String?
+  type          InvoiceType
+  status        InvoiceStatus       @default(DRAFT)
+  invoiceNumber String
+  subtotal      BigInt              @default(0)
+  extraCosts    BigInt              @default(0)
+  discount      BigInt              @default(0)
+  total         BigInt              @default(0)
+  description   String?
+  issuedAt      DateTime?
+  costingRecordedAt DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  movements     InventoryMovement[]
+  business      Business            @relation(fields: [businessId], references: [id])
+  contact       Contact?            @relation(fields: [contactId], references: [id])
+  items         InvoiceItem[]
+  payments      Payment[]
+
+  @@unique([businessId, invoiceNumber])
+  @@index([businessId, type, createdAt])
+}
+
+model InvoiceItem {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  productId      String
+  quantity       Decimal @db.Decimal(18, 3)
+  unitPrice      BigInt
+  total          BigInt
+
+  costOfGoodsSold BigInt @default(0)
+
+  invoice        Invoice @relation(fields: [invoiceId], references: [id])
+  product        Product @relation(fields: [productId], references: [id])
+}
+
+model Expense {
+  id          String          @id @default(cuid())
+  businessId  String
+  title       String
+  category    ExpenseCategory @default(OTHER)
+  amount      BigInt
+  method      PaymentMethod   @default(CASH)
+  status      ExpenseStatus   @default(CONFIRMED)
+  description String?
+  spentAt     DateTime        @default(now())
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  cancelledAt DateTime?
+  cancelReason String?
+
+  business    Business        @relation(fields: [businessId], references: [id])
+
+  @@index([businessId, spentAt])
+  @@index([businessId, category, spentAt])
+  @@index([businessId, status, spentAt])
+}
+
+enum ExpenseCategory {
+  RENT
+  SALARY
+  TRANSPORT
+  UTILITIES
+  ADVERTISING
+  MAINTENANCE
+  TAX
+  OTHER
+}
+
+enum ExpenseStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+model InventoryMovement {
+  id             String       @id @default(cuid())
+  businessId     String
+  productId      String
+  invoiceId      String?
+  type           MovementType
+  quantity       Decimal      @db.Decimal(18, 3)
+
+  totalCost      BigInt       @default(0)
+
+  averageCost    Decimal      @default(0) @db.Decimal(30, 9)
+  description    String?
+  createdAt      DateTime     @default(now())
+
+  business       Business     @relation(fields: [businessId], references: [id])
+  invoice        Invoice?     @relation(fields: [invoiceId], references: [id])
+  product        Product      @relation(fields: [productId], references: [id])
+
+  @@index([businessId, productId, createdAt])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  businessId     String
+  contactId      String?
+  invoiceId      String?
+
+  type           PaymentType
+  method         PaymentMethod
+  status         PaymentStatus @default(CONFIRMED)
+
+  amount         BigInt
+  trackingNumber String?
+  description    String?
+
+  paidAt         DateTime      @default(now())
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  cancelledAt    DateTime?
+  cancelReason   String?
+
+  business       Business      @relation(fields: [businessId], references: [id])
+  contact        Contact?      @relation(fields: [contactId], references: [id])
+  invoice        Invoice?      @relation(fields: [invoiceId], references: [id])
+
+  @@index([businessId, paidAt])
+  @@index([businessId, contactId, paidAt])
+  @@index([businessId, invoiceId])
+  @@index([businessId, status, paidAt])
+}
+
+enum PaymentMethod {
+  CASH
+  POS
+  CARD_TO_CARD
+  BANK_TRANSFER
+  CHECK
+}
+
+enum PaymentStatus {
+  CONFIRMED
+  CANCELLED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  BUSINESS_OWNER
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  CANCELLED
+}
+
+enum InvoiceType {
+  PURCHASE
+  SALE
+}
+
+enum MovementType {
+  PURCHASE
+  SALE
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  RETURN_IN
+  RETURN_OUT
+  INITIAL_STOCK
+}
+
+enum PaymentType {
+  RECEIPT
+  PAYMENT
+}
+
+enum CurrencyUnit {
+  RIAL
+  TOMAN
+}
