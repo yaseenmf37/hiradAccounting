@@ -1,3 +1,4 @@
+
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
@@ -5,8 +6,8 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
 
   outputFileTracingIncludes: {
-    "/*": ["./src/generated/prisma/**/*.node"],
-    "/api/*": ["./src/generated/prisma/**/*.node"],
+    "/*": ["./node_modules/.prisma/client/**/*.node"],
+    "/api/*": ["./node_modules/.prisma/client/**/*.node"],
   },
 
   turbopack: {
