@@ -2,6 +2,7 @@
 import type { CurrencyUnit } from "@prisma/client";
 
 const RIAL_PER_TOMAN = 10;
+export const MAX_CURRENCY_RIAL = 9_223_372_036_854_775_807n;
 
 /**
  * تبدیل مبلغ ورودی به واحد پایه دیتابیس (ریال)
@@ -13,6 +14,31 @@ export function toRial(
   return unit === "TOMAN"
     ? amount * BigInt(RIAL_PER_TOMAN)
     : amount;
+}
+
+export function currencyInputToRial(
+  amount: string,
+  unit: CurrencyUnit
+): bigint {
+  if (unit === "RIAL") {
+    if (!/^\d{1,18}$/.test(amount)) {
+      throw new Error("INVALID_CURRENCY_AMOUNT");
+    }
+
+    return BigInt(amount);
+  }
+
+  if (!/^\d{1,18}(\.\d)?$/.test(amount)) {
+    throw new Error("INVALID_CURRENCY_AMOUNT");
+  }
+
+  const [whole, fraction = "0"] = amount.split(".");
+  const converted = BigInt(whole) * BigInt(RIAL_PER_TOMAN) + BigInt(fraction);
+  if (converted > MAX_CURRENCY_RIAL) {
+    throw new Error("INVALID_CURRENCY_AMOUNT");
+  }
+
+  return converted;
 }
 
 /**

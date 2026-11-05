@@ -19,12 +19,17 @@ import {
   UserRoundCheck,
   BookOpen,
   ArrowLeftRight,
+  Printer,
 } from "lucide-react";
 import DatePicker from "react-multi-date-picker";
 import persian from "react-date-object/calendars/persian";
 import persian_fa from "react-date-object/locales/persian_fa";
 import gregorian from "react-date-object/calendars/gregorian";
 import DateObject from "react-date-object";
+import CursorPagination from "@/components/shared/cursor-pagination";
+import useCursorPage from "@/hooks/use-cursor-page";
+import useDebouncedValue from "@/hooks/use-debounced-value";
+import type { QuickAction } from "@/lib/quick-actions";
 
 
 type ContactType = "CUSTOMER" | "SUPPLIER" | "BOTH";
@@ -53,6 +58,15 @@ type ContactForm = {
   email: string;
   address: string;
   description: string;
+};
+
+const paymentMethodLabels: Record<string, string> = {
+  CASH: "نقدی",
+  CHECK: "چک",
+  CARD_TO_CARD: "کارت‌به‌کارت",
+  POS: "کارت‌خوان",
+  LEDGER: "حساب دفتری",
+  BANK_TRANSFER: "انتقال بانکی",
 };
 
 const emptyForm: ContactForm = {
@@ -142,23 +156,20 @@ function toEnglishDigits(value: string): string {
 
 export default function ContactsClient({
   currencyUnit,
+  quickAction,
 }: {
   currencyUnit: "RIAL" | "TOMAN";
+  quickAction?: QuickAction | null;
 }) {
   
 function formatLedgerAmount(amount: string) {
   const value = BigInt(amount);
   const isNegative = value < BigInt(0);
   const absoluteValue = isNegative ? -value : value;
-
-  const displayValue =
-    currencyUnit === "TOMAN"
-      ? absoluteValue / BigInt(10)
-      : absoluteValue;
-
-  const formatted = new Intl.NumberFormat("fa-IR").format(displayValue);
-
-  return isNegative ? `−${formatted}` : formatted;
+  const whole = currencyUnit === "TOMAN" ? absoluteValue / 10n : absoluteValue;
+  const fraction = currencyUnit === "TOMAN" ? absoluteValue % 10n : 0n;
+  const formatted = `${isNegative ? "−" : ""}${new Intl.NumberFormat("fa-IR").format(whole)}${fraction ? `٫${new Intl.NumberFormat("fa-IR").format(fraction)}` : ""}`;
+  return `${formatted} ${currencyUnit === "TOMAN" ? "تومان" : "ریال"}`;
 }
 
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -178,8 +189,28 @@ function formatLedgerAmount(amount: string) {
   const [ledgerError, setLedgerError] = useState("");
   const [ledgerStartDate, setLedgerStartDate] = useState<DateObject | null>(null);
   const [ledgerEndDate, setLedgerEndDate] = useState<DateObject | null>(null);
+  const [totalCount, setTotalCount] = useState(0);
+  const [listStats, setListStats] = useState({
+    active: 0,
+    customers: 0,
+    suppliers: 0,
+  });
+  const debouncedSearch = useDebouncedValue(search);
+  const paging = useCursorPage();
+  const ledgerPaging = useCursorPage();
 
-  const loadContacts = useCallback(async () => {
+  useEffect(() => {
+    if (
+      quickAction?.action !== "contact" ||
+      quickAction.targetView !== "contacts"
+    ) return;
+    setEditingContact(null);
+    setForm({ ...emptyForm, type: "CUSTOMER" });
+    setError("");
+    setModalOpen(true);
+  }, [quickAction?.requestId, quickAction?.action]);
+
+  const loadContacts = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError("");
 
@@ -187,12 +218,15 @@ function formatLedgerAmount(amount: string) {
       const params = new URLSearchParams({
         status: statusFilter,
         type: typeFilter,
+        limit: "50",
       });
 
-      if (search.trim()) params.set("search", search.trim());
+      if (paging.cursor) params.set("cursor", paging.cursor);
+      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
 
       const response = await fetch(`/api/contacts?${params.toString()}`, {
         cache: "no-store",
+        signal,
       });
 
       const data = await response.json();
@@ -202,17 +236,23 @@ function formatLedgerAmount(amount: string) {
       }
 
       setContacts(data.contacts ?? []);
+      setTotalCount(data.total ?? 0);
+      setListStats(data.stats ?? { active: 0, customers: 0, suppliers: 0 });
+      paging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(
         err instanceof Error ? err.message : "دریافت مخاطبین ناموفق بود."
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  }, [search, typeFilter, statusFilter]);
+  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor]);
 
   useEffect(() => {
-    void loadContacts();
+    const controller = new AbortController();
+    void loadContacts(controller.signal);
+    return () => controller.abort();
   }, [loadContacts]);
 
   function updateForm<K extends keyof ContactForm>(
@@ -344,7 +384,8 @@ function formatLedgerAmount(amount: string) {
   contact: Contact,
   startDate = ledgerStartDate,
   endDate = ledgerEndDate,
-) {
+    cursor: string | null = ledgerPaging.cursor,
+  ) {
   setLedgerContact(contact);
   setLedgerData(null);
   setLedgerError("");
@@ -352,6 +393,8 @@ function formatLedgerAmount(amount: string) {
 
   try {
 const params = new URLSearchParams();
+params.set("limit", "50");
+if (cursor) params.set("cursor", cursor);
 
 if (startDate) {
   params.set(
@@ -368,11 +411,6 @@ if (endDate) {
 }
 
 const query = params.toString();
-console.log({
-  startDate: startDate?.format("YYYY-MM-DD"),
-  endDate: endDate?.format("YYYY-MM-DD"),
-  query,
-});
 const response = await fetch(
   `/api/contacts/${contact.id}/ledger${query ? `?${query}` : ""}`,
   { cache: "no-store" },
@@ -385,6 +423,7 @@ const response = await fetch(
     }
 
     setLedgerData(data);
+    ledgerPaging.setNextCursor(data.nextCursor ?? null);
   } catch (err) {
     setLedgerError(
       err instanceof Error ? err.message : "دریافت دفتر حساب ناموفق بود."
@@ -394,13 +433,9 @@ const response = await fetch(
   }
 }
 
-  const activeCount = contacts.filter((item) => item.isActive).length;
-  const customerCount = contacts.filter(
-    (item) => item.type === "CUSTOMER" || item.type === "BOTH"
-  ).length;
-  const supplierCount = contacts.filter(
-    (item) => item.type === "SUPPLIER" || item.type === "BOTH"
-  ).length;
+  const activeCount = listStats.active;
+  const customerCount = listStats.customers;
+  const supplierCount = listStats.suppliers;
 
   return (
     <section dir="rtl" className="space-y-7">
@@ -412,14 +447,24 @@ const response = await fetch(
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={openCreateModal}
-          className="flex items-center justify-center gap-2 rounded-xl bg-green-500 px-5 py-3 text-sm font-bold text-black transition hover:bg-green-400"
-        >
-          <Plus size={18} />
-          افزودن مخاطب
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => window.print()}
+            className="flex items-center justify-center gap-2 rounded-xl border border-[#293642] px-4 py-3 text-sm text-slate-300 transition hover:bg-white/5"
+          >
+            <Printer size={17} />
+            چاپ فهرست
+          </button>
+          <button
+            type="button"
+            onClick={openCreateModal}
+            className="flex items-center justify-center gap-2 rounded-xl bg-green-500 px-5 py-3 text-sm font-bold text-black transition hover:bg-green-400"
+          >
+            <Plus size={18} />
+            افزودن مخاطب
+          </button>
+        </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-3">
@@ -475,7 +520,10 @@ const response = await fetch(
             />
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                paging.resetPages();
+                setSearch(event.target.value);
+              }}
               placeholder="جست‌وجوی نام، شماره تماس یا ایمیل..."
               className={`${inputClass} pr-11`}
             />
@@ -484,7 +532,10 @@ const response = await fetch(
           <select
             value={typeFilter}
             onChange={(event) =>
-              setTypeFilter(event.target.value as FilterType)
+              {
+                paging.resetPages();
+                setTypeFilter(event.target.value as FilterType);
+              }
             }
             className={`${inputClass} lg:w-48`}
           >
@@ -497,7 +548,10 @@ const response = await fetch(
           <select
             value={statusFilter}
             onChange={(event) =>
-              setStatusFilter(event.target.value as "active" | "all")
+              {
+                paging.resetPages();
+                setStatusFilter(event.target.value as "active" | "all");
+              }
             }
             className={`${inputClass} lg:w-44`}
           >
@@ -606,7 +660,10 @@ const response = await fetch(
                         <button
   type="button"
   title="مشاهده دفتر حساب"
-  onClick={() => void openLedger(contact)}
+  onClick={() => {
+    ledgerPaging.resetPages();
+    void openLedger(contact, ledgerStartDate, ledgerEndDate, null);
+  }}
   className="rounded-lg border border-[#293642] p-2 text-blue-400 transition hover:border-blue-500/50 hover:bg-blue-500/10"
 >
   <BookOpen size={16} />
@@ -649,6 +706,14 @@ const response = await fetch(
             </tbody>
           </table>
         </div>
+        <CursorPagination
+          total={totalCount}
+          page={paging.page}
+          hasNext={Boolean(paging.nextCursor)}
+          loading={loading}
+          onPrevious={paging.previousPage}
+          onNext={paging.nextPage}
+        />
       </div>
 
       <p className="text-xs text-slate-500">
@@ -858,7 +923,8 @@ const response = await fetch(
   type="button"
   onClick={() => {
     if (ledgerContact) {
-      openLedger(ledgerContact, ledgerStartDate, ledgerEndDate);
+      ledgerPaging.resetPages();
+      openLedger(ledgerContact, ledgerStartDate, ledgerEndDate, null);
     }
   }}
   style={{justifyItems : "center"}}
@@ -885,7 +951,8 @@ const response = await fetch(
       setLedgerEndDate(null);
 
       if (ledgerContact) {
-        openLedger(ledgerContact, null, null);
+        ledgerPaging.resetPages();
+        openLedger(ledgerContact, null, null, null);
       }
     }}
     className="rounded-lg border border-[#344452] px-4 py-2 text-sm text-slate-300 transition hover:bg-[#1c2a36]"
@@ -916,14 +983,45 @@ const response = await fetch(
               <td className="whitespace-nowrap p-3">
                 {new Date(entry.date).toLocaleDateString("fa-IR-u-ca-persian")}
               </td>
-              <td className="p-3">{entry.description}</td>
+              <td className="p-3">
+                <p>{entry.title}</p>
+                {entry.reference && <p className="text-xs text-slate-500">{entry.reference}</p>}
+                {entry.description && <p className="text-xs text-slate-500">{entry.description}</p>}
+                {entry.paymentMethod && (
+                  <p className="text-xs text-slate-400">
+                    روش پرداخت: {paymentMethodLabels[entry.paymentMethod] ?? entry.paymentMethod}
+                    {entry.trackingNumber ? ` — پیگیری: ${entry.trackingNumber}` : ""}
+                  </p>
+                )}
+                {entry.direction === "INFO" && (
+                  <p className="text-xs text-slate-400">
+                    مبلغ حساب دفتری: {formatLedgerAmount(entry.amount)} (بدون اثر نقدی بر مانده)
+                  </p>
+                )}
+                {entry.paymentDetails && Object.entries(entry.paymentDetails)
+                  .map(([key, value]) => {
+                    if (typeof value !== "string" || !value) return null;
+                    const labels: Record<string, string> = {
+                      checkNumber: "شماره چک",
+                      checkIssuedAt: "تاریخ صدور",
+                      checkDueAt: "سررسید",
+                      payableTo: "در وجه",
+                      destinationDetails: "حساب/کارت مقصد",
+                    };
+                    return (
+                      <p key={key} className="text-xs text-slate-500">
+                        {labels[key] ?? key}: {value}
+                      </p>
+                    );
+                  })}
+              </td>
               <td className="p-3 font-medium text-red-400">
-                {entry.type === "DEBIT"
+                {entry.direction === "DEBIT"
                   ? formatLedgerAmount(entry.amount)
                   : "—"}
               </td>
               <td className="p-3 font-medium text-green-400">
-                {entry.type === "CREDIT"
+                {entry.direction === "CREDIT"
                   ? formatLedgerAmount(entry.amount)
                   : "—"}
               </td>
@@ -936,12 +1034,53 @@ const response = await fetch(
       </table>
     </div>
   )}
+  <CursorPagination
+    total={ledgerData.total ?? 0}
+    page={ledgerPaging.page}
+    hasNext={Boolean(ledgerPaging.nextCursor)}
+    loading={ledgerLoading}
+    onPrevious={() => {
+      const cursor = ledgerPaging.previousPage();
+      if (ledgerContact) {
+        void openLedger(ledgerContact, ledgerStartDate, ledgerEndDate, cursor);
+      }
+    }}
+    onNext={() => {
+      const cursor = ledgerPaging.nextPage();
+      if (ledgerContact && cursor) {
+        void openLedger(ledgerContact, ledgerStartDate, ledgerEndDate, cursor);
+      }
+    }}
+  />
 </div>
         </div>
       ) : null}
     </div>
   </Modal>
 )}
+<section className="print-only" dir="rtl">
+  <h1>فهرست مخاطبین</h1>
+  <p>تاریخ چاپ: {new Intl.DateTimeFormat("fa-IR").format(new Date())}</p>
+  <table className="print-invoice-table">
+    <thead>
+      <tr>
+        <th>ردیف</th><th>نام</th><th>نوع</th><th>تلفن</th><th>ایمیل</th><th>آدرس</th>
+      </tr>
+    </thead>
+    <tbody>
+      {contacts.map((contact, index) => (
+        <tr key={contact.id}>
+          <td>{new Intl.NumberFormat("fa-IR").format(index + 1)}</td>
+          <td>{contact.name}</td>
+          <td>{typeLabel(contact.type)}</td>
+          <td>{contact.phone || "—"}</td>
+          <td>{contact.email || "—"}</td>
+          <td>{contact.address || "—"}</td>
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</section>
     </section>
   );
 }

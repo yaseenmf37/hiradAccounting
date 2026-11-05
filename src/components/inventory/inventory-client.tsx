@@ -6,6 +6,11 @@ import {
   Archive, X, ChevronDown, Tag, Loader2, Pencil, History,
   ArrowDownToLine, ArrowUpFromLine, RotateCcw,
 } from "lucide-react";
+import CursorPagination from "@/components/shared/cursor-pagination";
+import NumericInput from "@/components/shared/numeric-input";
+import useCursorPage from "@/hooks/use-cursor-page";
+import useDebouncedValue from "@/hooks/use-debounced-value";
+import type { QuickAction } from "@/lib/quick-actions";
 
 type Product = {
   id: string;
@@ -41,8 +46,18 @@ type Movement = {
   createdAt: string;
 };
 
+type Backorder = {
+  id: string;
+  outstanding: string;
+  requested: string;
+  fulfilled: string;
+  product: { name: string; unit: string; stock: string };
+  invoice: { invoiceNumber: string };
+  customerName: string | null;
+};
+
 type CurrencyUnit = "RIAL" | "TOMAN";
-type Props = { currencyUnit: CurrencyUnit };
+type Props = { currencyUnit: CurrencyUnit; quickAction?: QuickAction | null };
 
 type ProductForm = {
   name: string;
@@ -78,12 +93,27 @@ function formatNumber(value: string | number) {
 }
 
 function formatMoney(value: string, unit: CurrencyUnit) {
-  const amount = BigInt(value || "0");
-  const displayed = unit === "TOMAN" ? amount / 10n : amount;
+  const parsed = /^([+-]?)(\d+)(?:\.(\d+))?$/.exec(value.trim());
+  if (!parsed) return `— ${unit === "TOMAN" ? "تومان" : "ریال"}`;
 
-  return `${new Intl.NumberFormat("fa-IR").format(displayed)} ${
-    unit === "TOMAN" ? "تومان" : "ریال"
-  }`;
+  const [, sign, whole, fraction = ""] = parsed;
+  const roundedRial =
+    BigInt(whole) + (fraction[0] && fraction[0] >= "5" ? 1n : 0n);
+  const isNegative = sign === "-" && roundedRial !== 0n;
+  const displaySign = isNegative ? "−" : "";
+  const formatter = new Intl.NumberFormat("fa-IR");
+
+  if (unit === "RIAL") {
+    return `${displaySign}${formatter.format(roundedRial)} ریال`;
+  }
+
+  const wholeToman = roundedRial / 10n;
+  const rialRemainder = roundedRial % 10n;
+  const fractionalToman = rialRemainder
+    ? `٫${formatter.format(rialRemainder)}`
+    : "";
+
+  return `${displaySign}${formatter.format(wholeToman)}${fractionalToman} تومان`;
 }
 
 async function readResponse(response: Response) {
@@ -96,7 +126,7 @@ async function readResponse(response: Response) {
   return data;
 }
 
-export default function InventoryClient({ currencyUnit }: Props) {
+export default function InventoryClient({ currencyUnit, quickAction }: Props) {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [search, setSearch] = useState("");
@@ -122,87 +152,194 @@ export default function InventoryClient({ currencyUnit }: Props) {
   const [movementUnitCost, setMovementUnitCost] = useState("");
   const [movementDescription, setMovementDescription] = useState("");
   const [movements, setMovements] = useState<Movement[]>([]);
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
+  const [bulkPriceOpen, setBulkPriceOpen] = useState(false);
+  const [bulkPriceField, setBulkPriceField] = useState<"PURCHASE" | "SALE">("SALE");
+  const [bulkPercent, setBulkPercent] = useState("");
+  const [backorders, setBackorders] = useState<Backorder[]>([]);
+  const [allocatingId, setAllocatingId] = useState("");
+  const [allocationQuantity, setAllocationQuantity] = useState("1");
+  const [productTotal, setProductTotal] = useState(0);
+  const [productStats, setProductStats] = useState({
+    total: 0,
+    lowStock: 0,
+    archived: 0,
+    inventoryValue: "0",
+  });
+  const [backorderTotal, setBackorderTotal] = useState(0);
+  const productPaging = useCursorPage();
+  const backorderPaging = useCursorPage();
+  const debouncedSearch = useDebouncedValue(search);
 
-  const loadData = useCallback(async () => {
+  useEffect(() => {
+    if (
+      quickAction?.action !== "product" ||
+      quickAction.targetView !== "inventory"
+    ) return;
+    setForm(emptyForm);
+    setEditingProduct(null);
+    setError("");
+    setModalOpen(true);
+  }, [quickAction?.requestId, quickAction?.action]);
+
+  const loadData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError("");
 
     try {
-      const [productsResponse, categoriesResponse] = await Promise.all([
-        fetch(`/api/products?includeArchived=${statusFilter === "all"}`, {
-          cache: "no-store",
-        }),
-        fetch("/api/categories", { cache: "no-store" }),
-      ]);
+      const params = new URLSearchParams({
+        includeArchived: String(statusFilter === "all"),
+        limit: "50",
+      });
+      if (productPaging.cursor) params.set("cursor", productPaging.cursor);
+      if (categoryFilter !== "all") params.set("categoryId", categoryFilter);
+      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
 
-      const [productsData, categoriesData] = await Promise.all([
-        readResponse(productsResponse),
-        readResponse(categoriesResponse),
-      ]);
+      const productsResponse = await fetch(`/api/products?${params}`, {
+        cache: "no-store",
+        signal,
+      });
+      const productsData = await readResponse(productsResponse);
 
-      setProducts(
-        Array.isArray(productsData)
-          ? productsData
-          : productsData.products ?? [],
-      );
-
-      setCategories(
-        Array.isArray(categoriesData)
-          ? categoriesData
-          : categoriesData.categories ?? [],
-      );
+      setProducts(productsData.products ?? []);
+      setProductTotal(productsData.total ?? 0);
+      setProductStats(productsData.stats ?? {
+        total: 0,
+        lowStock: 0,
+        archived: 0,
+        inventoryValue: "0",
+      });
+      productPaging.setNextCursor(productsData.nextCursor ?? null);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(
         err instanceof Error
           ? err.message
           : "خطا در دریافت اطلاعات انبار.",
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, categoryFilter, debouncedSearch, productPaging.cursor, productPaging.setNextCursor]);
+
+  const loadBackorders = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const params = new URLSearchParams({ limit: "50" });
+      if (backorderPaging.cursor) params.set("cursor", backorderPaging.cursor);
+      const response = await fetch(`/api/backorders?${params}`, {
+        cache: "no-store",
+        signal,
+      });
+      const data = await readResponse(response);
+      setBackorders(data.backorders ?? []);
+      setBackorderTotal(data.total ?? 0);
+      backorderPaging.setNextCursor(data.nextCursor ?? null);
+    } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      setError(err instanceof Error ? err.message : "دریافت کسری سفارش‌ها ناموفق بود.");
+    }
+  }, [backorderPaging.cursor, backorderPaging.setNextCursor]);
 
   useEffect(() => {
-    void loadData();
+    const controller = new AbortController();
+    void loadData(controller.signal);
+    return () => controller.abort();
   }, [loadData]);
 
-  const filteredProducts = useMemo(() => {
-    const normalizedSearch = search.trim().toLocaleLowerCase();
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/categories", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = await readResponse(response);
+        setCategories(Array.isArray(data) ? data : data.categories ?? []);
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setError(err instanceof Error ? err.message : "دریافت دسته‌بندی‌ها ناموفق بود.");
+      }
+    })();
+    return () => controller.abort();
+  }, []);
 
-    return products.filter((product) => {
-      const matchesSearch =
-        !normalizedSearch ||
-        product.name.toLocaleLowerCase().includes(normalizedSearch) ||
-        product.sku?.toLocaleLowerCase().includes(normalizedSearch) ||
-        product.barcode?.includes(normalizedSearch);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadBackorders(controller.signal);
+    return () => controller.abort();
+  }, [loadBackorders]);
 
-      const matchesCategory =
-        categoryFilter === "all" || product.categoryId === categoryFilter;
-
-      const matchesStatus =
-        statusFilter === "all" || product.isActive;
-
-      return matchesSearch && matchesCategory && matchesStatus;
-    });
-  }, [products, search, categoryFilter, statusFilter]);
+  const filteredProducts = products;
 
   const stats = useMemo(() => {
-    const active = products.filter((product) => product.isActive);
+    return productStats;
+  }, [productStats]);
 
-    const totalInventoryValue = active.reduce(
-      (sum, product) => sum + BigInt(product.inventoryValue || "0"),
-      0n,
-    );
+  const bulkPricePreview = useMemo(() => {
+    if (!/^\d{1,3}(\.\d{1,2})?$/.test(bulkPercent) || !selectedProductIds.length) return [];
+    const [whole, fraction = ""] = bulkPercent.split(".");
+    const basisPoints = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+    if (basisPoints <= 0n || basisPoints > 99999n) return [];
+    return products.filter((product) => selectedProductIds.includes(product.id)).map((product) => {
+      const before = BigInt(bulkPriceField === "PURCHASE" ? product.purchasePrice : product.salePrice);
+      return {
+        id: product.id,
+        name: product.name,
+        before,
+        after: (before * (10000n + basisPoints) + 5000n) / 10000n,
+      };
+    });
+  }, [bulkPercent, bulkPriceField, products, selectedProductIds]);
 
-    return {
-      total: active.length,
-      lowStock: active.filter(
-        (product) => Number(product.stock) <= Number(product.minStock),
-      ).length,
-      archived: products.filter((product) => !product.isActive).length,
-      inventoryValue: totalInventoryValue.toString(),
-    };
-  }, [products]);
+  async function applyBulkPriceIncrease() {
+    if (!bulkPricePreview.length) return;
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/products/prices/bulk", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productIds: selectedProductIds,
+          field: bulkPriceField,
+          percent: bulkPercent,
+        }),
+      });
+      await readResponse(response);
+      setBulkPriceOpen(false);
+      setBulkPercent("");
+      setSelectedProductIds([]);
+      setSuccess("قیمت کالاهای انتخاب‌شده افزایش یافت.");
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "افزایش گروهی قیمت ناموفق بود.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function allocateBackorder(backorder: Backorder) {
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/backorders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ backorderId: backorder.id, quantity: allocationQuantity }),
+      });
+      await readResponse(response);
+      setAllocatingId("");
+      setAllocationQuantity("1");
+      setSuccess("موجودی به سفارش قبلی تخصیص یافت.");
+      await loadData();
+      backorderPaging.resetPages();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تخصیص موجودی انجام نشد.");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   function updateForm(field: keyof ProductForm, value: string) {
     setForm((previous) => ({ ...previous, [field]: value }));
@@ -479,7 +616,10 @@ export default function InventoryClient({ currencyUnit }: Props) {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => void loadData()}
+            onClick={() => {
+              void loadData();
+              backorderPaging.resetPages();
+            }}
             disabled={loading}
             className="flex items-center gap-2 rounded-xl border border-[#293642] bg-[#111820] px-4 py-3 text-sm text-slate-300 transition hover:border-green-500/40 disabled:opacity-50"
           >
@@ -552,7 +692,10 @@ export default function InventoryClient({ currencyUnit }: Props) {
 
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                productPaging.resetPages();
+                setSearch(event.target.value);
+              }}
               placeholder="جست‌وجوی نام کالا، کد یا بارکد..."
               className="h-11 w-full rounded-xl border border-[#293642] bg-[#0b0f14] pr-10 pl-3 text-sm text-white outline-none transition placeholder:text-slate-600 focus:border-green-500/60"
             />
@@ -561,7 +704,10 @@ export default function InventoryClient({ currencyUnit }: Props) {
           <div className="relative">
             <select
               value={categoryFilter}
-              onChange={(event) => setCategoryFilter(event.target.value)}
+              onChange={(event) => {
+                productPaging.resetPages();
+                setCategoryFilter(event.target.value);
+              }}
               className="h-11 min-w-44 appearance-none rounded-xl border border-[#293642] bg-[#0b0f14] px-4 pl-10 text-sm text-slate-300 outline-none focus:border-green-500/60"
             >
               <option value="all">همه دسته‌بندی‌ها</option>
@@ -581,7 +727,10 @@ export default function InventoryClient({ currencyUnit }: Props) {
 
           <select
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
+            onChange={(event) => {
+              productPaging.resetPages();
+              setStatusFilter(event.target.value);
+            }}
             className="h-11 rounded-xl border border-[#293642] bg-[#0b0f14] px-4 text-sm text-slate-300 outline-none focus:border-green-500/60"
           >
             <option value="active">کالاهای فعال</option>
@@ -621,9 +770,17 @@ export default function InventoryClient({ currencyUnit }: Props) {
           <div>
             <h2 className="font-bold text-white">فهرست کالاها</h2>
             <p className="mt-1 text-xs text-slate-500">
-              {formatNumber(filteredProducts.length)} کالا
+              {formatNumber(productTotal)} کالا
             </p>
           </div>
+          <button
+            type="button"
+            disabled={!selectedProductIds.length}
+            onClick={() => setBulkPriceOpen(true)}
+            className="rounded-lg border border-green-500/30 px-3 py-2 text-xs text-green-400 disabled:opacity-40"
+          >
+            افزایش قیمت انتخاب‌شده‌ها ({formatNumber(selectedProductIds.length)})
+          </button>
         </div>
 
         {loading ? (
@@ -647,6 +804,16 @@ export default function InventoryClient({ currencyUnit }: Props) {
             <table className="w-full min-w-[1150px] text-right text-sm">
               <thead className="bg-[#0b0f14] text-xs text-slate-500">
                 <tr>
+                  <th className="px-3 py-4">
+                    <input
+                      type="checkbox"
+                      aria-label="انتخاب همه کالاها"
+                      checked={filteredProducts.length > 0 && filteredProducts.every((product) => selectedProductIds.includes(product.id))}
+                      onChange={(event) => setSelectedProductIds((current) => event.target.checked
+                        ? [...new Set([...current, ...filteredProducts.map((product) => product.id)])]
+                        : current.filter((id) => !filteredProducts.some((product) => product.id === id)))}
+                    />
+                  </th>
                   <th className="px-5 py-4 font-medium">نام کالا</th>
                   <th className="px-5 py-4 font-medium">دسته‌بندی</th>
                   <th className="px-5 py-4 font-medium">کد کالا</th>
@@ -670,6 +837,16 @@ export default function InventoryClient({ currencyUnit }: Props) {
                       key={product.id}
                       className="transition hover:bg-white/[0.02]"
                     >
+                      <td className="px-3 py-4">
+                        <input
+                          type="checkbox"
+                          aria-label={`انتخاب ${product.name}`}
+                          checked={selectedProductIds.includes(product.id)}
+                          onChange={(event) => setSelectedProductIds((current) => event.target.checked
+                            ? [...new Set([...current, product.id])]
+                            : current.filter((id) => id !== product.id))}
+                        />
+                      </td>
                       <td className="px-5 py-4">
                         <p className="font-semibold text-white">
                           {product.name}
@@ -794,7 +971,96 @@ export default function InventoryClient({ currencyUnit }: Props) {
             </table>
           </div>
         )}
+        <CursorPagination
+          total={productTotal}
+          page={productPaging.page}
+          hasNext={Boolean(productPaging.nextCursor)}
+          loading={loading}
+          onPrevious={productPaging.previousPage}
+          onNext={productPaging.nextPage}
+        />
       </div>
+
+      {bulkPriceOpen && (
+        <Modal title="افزایش درصدی قیمت" onClose={() => setBulkPriceOpen(false)}>
+          <div className="space-y-4">
+            <label className="block space-y-2 text-sm text-slate-300">
+              نوع قیمت
+              <select value={bulkPriceField} onChange={(event) => setBulkPriceField(event.target.value as "PURCHASE" | "SALE")} className={inputClass}>
+                <option value="PURCHASE">قیمت خرید</option>
+                <option value="SALE">قیمت فروش</option>
+              </select>
+            </label>
+            <label className="block space-y-2 text-sm text-slate-300">
+              درصد افزایش
+              <NumericInput min="0.01" max="999.99" step="0.01" value={bulkPercent} onChange={(event) => setBulkPercent(event.target.value)} onFocus={(event) => event.currentTarget.select()} className={inputClass} />
+            </label>
+            <div className="max-h-60 overflow-y-auto rounded-xl border border-[#293642]">
+              <table className="w-full text-right text-xs">
+                <thead><tr className="text-slate-500"><th className="p-3">کالا</th><th className="p-3">قیمت فعلی</th><th className="p-3">قیمت جدید</th></tr></thead>
+                <tbody>
+                  {bulkPricePreview.map((item) => (
+                    <tr key={item.id} className="border-t border-[#293642] text-slate-300">
+                      <td className="p-3">{item.name}</td>
+                      <td className="p-3">{formatMoney(item.before.toString(), currencyUnit)}</td>
+                      <td className="p-3 text-green-400">{formatMoney(item.after.toString(), currencyUnit)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {!bulkPricePreview.length && <p className="p-3 text-slate-500">درصد معتبر و محصولات انتخاب‌شده را بررسی کنید.</p>}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setBulkPriceOpen(false)} className="rounded-lg border border-[#293642] px-4 py-2 text-sm text-slate-300">انصراف</button>
+              <button type="button" disabled={saving || !bulkPricePreview.length} onClick={() => void applyBulkPriceIncrease()} className="rounded-lg bg-green-500 px-4 py-2 text-sm font-bold text-black disabled:opacity-40">تأیید و اعمال</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {backorderTotal > 0 && (
+        <div className="rounded-2xl border border-amber-500/20 bg-[#111820]">
+          <div className="border-b border-[#222d38] p-5">
+            <h2 className="font-bold text-white">کسری سفارش‌های فروش</h2>
+            <p className="mt-1 text-xs text-slate-400">این مقادیر مستقل از موجودی منفی ثبت شده‌اند. {formatNumber(backorderTotal)} مورد</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-right text-sm">
+              <thead className="text-xs text-slate-500"><tr><th className="p-4">فاکتور / مشتری</th><th className="p-4">کالا</th><th className="p-4">سفارش</th><th className="p-4">تأمین‌شده</th><th className="p-4">کسری</th><th className="p-4">عملیات</th></tr></thead>
+              <tbody>
+                {backorders.map((entry) => (
+                  <tr key={entry.id} className="border-t border-[#222d38] text-slate-300">
+                    <td className="p-4">{entry.invoice.invoiceNumber}{entry.customerName ? ` — ${entry.customerName}` : ""}</td>
+                    <td className="p-4">{entry.product.name}</td>
+                    <td className="p-4">{formatNumber(entry.requested)} {entry.product.unit}</td>
+                    <td className="p-4">{formatNumber(entry.fulfilled)} {entry.product.unit}</td>
+                    <td className="p-4 text-amber-400">{formatNumber(entry.outstanding)} {entry.product.unit}</td>
+                    <td className="p-4">
+                      {allocatingId === entry.id ? (
+                        <div className="flex gap-2">
+                          <NumericInput min="0.001" max={entry.outstanding} step="0.001" value={allocationQuantity} onChange={(event) => setAllocationQuantity(event.target.value)} className="w-24 rounded border border-[#293642] bg-[#0b0f14] px-2 py-1" />
+                          <button disabled={saving} onClick={() => void allocateBackorder(entry)} className="text-green-400">تخصیص</button>
+                          <button onClick={() => setAllocatingId("")} className="text-slate-400">لغو</button>
+                        </div>
+                      ) : (
+                        <button disabled={Number(entry.product.stock) <= 0} onClick={() => { setAllocatingId(entry.id); setAllocationQuantity(entry.outstanding); }} className="text-blue-400 disabled:opacity-40">تخصیص موجودی</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <CursorPagination
+            total={backorderTotal}
+            page={backorderPaging.page}
+            hasNext={Boolean(backorderPaging.nextCursor)}
+            loading={false}
+            onPrevious={backorderPaging.previousPage}
+            onNext={backorderPaging.nextPage}
+          />
+        </div>
+      )}
 
       {modalOpen && (
         <Modal
@@ -888,8 +1154,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
               </Field>
 
               <Field label="حداقل موجودی">
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="0.001"
                   value={form.minStock}
@@ -906,8 +1171,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
               <Field
                 label={`قیمت خرید (${currencyUnit === "TOMAN" ? "تومان" : "ریال"})`}
               >
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="1"
                   value={form.purchasePrice}
@@ -922,8 +1186,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
               <Field
                 label={`قیمت فروش (${currencyUnit === "TOMAN" ? "تومان" : "ریال"})`}
               >
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="1"
                   value={form.salePrice}
@@ -938,8 +1201,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
 
             {!editingProduct && (
               <Field label="موجودی اولیه">
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="0.001"
                   value={form.initialStock}
@@ -1066,8 +1328,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
             </div>
 
             <Field label="مقدار">
-              <input
-                type="number"
+              <NumericInput
                 min="0.001"
                 step="0.001"
                 required
@@ -1084,8 +1345,7 @@ export default function InventoryClient({ currencyUnit }: Props) {
               <Field
                 label={`بهای خرید هر واحد (${currencyUnit === "TOMAN" ? "تومان" : "ریال"})`}
               >
-                <input
-                  type="number"
+                <NumericInput
                   min="0"
                   step="1"
                   required

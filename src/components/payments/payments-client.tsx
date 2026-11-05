@@ -20,6 +20,11 @@ import DatePicker from "react-multi-date-picker";
 import persian from "react-date-object/calendars/persian";
 import persian_fa from "react-date-object/locales/persian_fa";
 import DateObject from "react-date-object";
+import CursorPagination from "@/components/shared/cursor-pagination";
+import NumericInput from "@/components/shared/numeric-input";
+import useCursorPage from "@/hooks/use-cursor-page";
+import useDebouncedValue from "@/hooks/use-debounced-value";
+import type { QuickAction } from "@/lib/quick-actions";
 
 type CurrencyUnit = "RIAL" | "TOMAN";
 type PaymentType = "RECEIPT" | "PAYMENT";
@@ -34,6 +39,8 @@ type PaymentStatus = "CONFIRMED" | "CANCELLED";
 type Contact = {
   id: string;
   name: string;
+  phone: string | null;
+  email: string | null;
   type: "CUSTOMER" | "SUPPLIER" | "BOTH";
 };
 
@@ -56,6 +63,11 @@ type Payment = {
   status: PaymentStatus;
   amount: string;
   trackingNumber: string | null;
+  checkNumber?: string | null;
+  checkIssuedAt?: string | null;
+  checkDueAt?: string | null;
+  payableTo?: string | null;
+  destinationDetails?: string | null;
   description: string | null;
   paidAt: string;
   cancelledAt: string | null;
@@ -77,6 +89,11 @@ type PaymentForm = {
   invoiceId: string;
   amount: string;
   trackingNumber: string;
+  checkNumber: string;
+  checkIssuedAt: string;
+  checkDueAt: string;
+  payableTo: string;
+  destinationDetails: string;
   description: string;
   paidAt: string;
 };
@@ -88,6 +105,11 @@ const emptyForm: PaymentForm = {
   invoiceId: "",
   amount: "",
   trackingNumber: "",
+  checkNumber: "",
+  checkIssuedAt: "",
+  checkDueAt: "",
+  payableTo: "",
+  destinationDetails: "",
   description: "",
   paidAt: new Date().toISOString().slice(0, 16),
 };
@@ -165,8 +187,10 @@ function Field({
 
 export default function PaymentsClient({
   currencyUnit,
+  quickAction,
 }: {
   currencyUnit: CurrencyUnit;
+  quickAction?: QuickAction | null;
 }) {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -182,63 +206,129 @@ export default function PaymentsClient({
   const [form, setForm] = useState<PaymentForm>(emptyForm);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [totalCount, setTotalCount] = useState(0);
+  const [serverStats, setServerStats] = useState({
+    receipts: "0",
+    payments: "0",
+    confirmedCount: 0,
+  });
+  const debouncedSearch = useDebouncedValue(search);
+  const [contactSearch, setContactSearch] = useState("");
+  const [invoiceSearch, setInvoiceSearch] = useState("");
+  const debouncedContactSearch = useDebouncedValue(contactSearch);
+  const debouncedInvoiceSearch = useDebouncedValue(invoiceSearch);
+  const paging = useCursorPage();
 
-  const loadData = useCallback(async () => {
+  useEffect(() => {
+    if (
+      quickAction?.action === "payment" &&
+      quickAction.targetView === "payments"
+    ) openCreateModal();
+  }, [quickAction?.requestId, quickAction?.action]);
+
+  const loadData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError("");
 
     try {
       const params = new URLSearchParams();
+      params.set("limit", "50");
+      if (paging.cursor) params.set("cursor", paging.cursor);
       if (typeFilter !== "ALL") params.set("type", typeFilter);
       if (statusFilter !== "ALL") params.set("status", statusFilter);
-      if (search.trim()) params.set("search", search.trim());
+      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
 
-      const [paymentResponse, contactResponse, invoiceResponse] =
-        await Promise.all([
-          fetch(`/api/payments?${params.toString()}`, { cache: "no-store" }),
-          fetch("/api/contacts?status=active&type=ALL", {
-            cache: "no-store",
-          }),
-          fetch("/api/invoices?status=ISSUED", { cache: "no-store" }),
-        ]);
-
-      const [paymentData, contactData, invoiceData] = await Promise.all([
-        paymentResponse.json(),
-        contactResponse.json(),
-        invoiceResponse.json(),
-      ]);
+      const paymentResponse = await fetch(`/api/payments?${params.toString()}`, {
+        cache: "no-store",
+        signal,
+      });
+      const paymentData = await paymentResponse.json();
 
       if (!paymentResponse.ok) {
         throw new Error(paymentData.error || "دریافت تراکنش‌ها ناموفق بود.");
       }
 
-      if (!contactResponse.ok) {
-        throw new Error(contactData.message || "دریافت مخاطبین ناموفق بود.");
-      }
-
-      if (!invoiceResponse.ok) {
-        throw new Error(invoiceData.message || "دریافت فاکتورها ناموفق بود.");
-      }
-
       setPayments(paymentData.payments ?? []);
-      setContacts(contactData.contacts ?? []);
-      setInvoices(
-        (invoiceData.invoices ?? []).filter(
-          (invoice: Invoice) => invoice.status === "ISSUED"
-        )
-      );
+      setTotalCount(paymentData.total ?? 0);
+      setServerStats(paymentData.stats ?? {
+        receipts: "0",
+        payments: "0",
+        confirmedCount: 0,
+      });
+      paging.setNextCursor(paymentData.nextCursor ?? null);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(
         err instanceof Error ? err.message : "دریافت اطلاعات ناموفق بود."
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  }, [search, typeFilter, statusFilter]);
+  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor]);
 
   useEffect(() => {
-    void loadData();
+    const controller = new AbortController();
+    void loadData(controller.signal);
+    return () => controller.abort();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const contactParams = new URLSearchParams({
+          status: "active",
+          type: "ALL",
+          limit: "100",
+        });
+        if (debouncedContactSearch.trim()) {
+          contactParams.set("search", debouncedContactSearch.trim());
+        }
+        const invoiceParams = new URLSearchParams({
+          status: "ISSUED",
+          limit: "100",
+        });
+        if (debouncedInvoiceSearch.trim()) {
+          invoiceParams.set("search", debouncedInvoiceSearch.trim());
+        }
+        const [contactResponse, invoiceResponse] = await Promise.all([
+          fetch(`/api/contacts?${contactParams}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          }),
+          fetch(`/api/invoices?${invoiceParams}`, {
+            cache: "no-store",
+            signal: controller.signal,
+          }),
+        ]);
+        const [contactData, invoiceData] = await Promise.all([
+          contactResponse.json(),
+          invoiceResponse.json(),
+        ]);
+        if (!contactResponse.ok) {
+          throw new Error(contactData.message || "دریافت مخاطبین ناموفق بود.");
+        }
+        if (!invoiceResponse.ok) {
+          throw new Error(invoiceData.message || "دریافت فاکتورها ناموفق بود.");
+        }
+        setContacts((current) => {
+          const byId = new Map(current.map((contact: Contact) => [contact.id, contact]));
+          for (const contact of contactData.contacts ?? []) byId.set(contact.id, contact);
+          return [...byId.values()];
+        });
+        setInvoices((current) => {
+          const byId = new Map(current.map((invoice: Invoice) => [invoice.id, invoice]));
+          for (const invoice of invoiceData.invoices ?? []) byId.set(invoice.id, invoice);
+          return [...byId.values()];
+        });
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setError(err instanceof Error ? err.message : "دریافت اطلاعات فرم ناموفق بود.");
+      }
+    })();
+    return () => controller.abort();
+  }, [modalOpen, debouncedContactSearch, debouncedInvoiceSearch]);
 
   function updateForm<K extends keyof PaymentForm>(
     key: K,
@@ -249,6 +339,8 @@ export default function PaymentsClient({
 
   function openCreateModal() {
     setForm(emptyForm);
+    setContactSearch("");
+    setInvoiceSearch("");
     setError("");
     setModalOpen(true);
   }
@@ -259,10 +351,14 @@ export default function PaymentsClient({
 
   const availableInvoices = invoices.filter((invoice) => {
     const expectedType = form.type === "RECEIPT" ? "SALE" : "PURCHASE";
+    const query = invoiceSearch.trim().toLocaleLowerCase();
 
     return (
       invoice.type === expectedType &&
-      (!form.contactId || invoice.contactId === form.contactId)
+      (!form.contactId || invoice.contactId === form.contactId) &&
+      (!query ||
+        invoice.invoiceNumber.toLocaleLowerCase().includes(query) ||
+        invoice.contact?.name.toLocaleLowerCase().includes(query))
     );
   });
 
@@ -306,6 +402,14 @@ export default function PaymentsClient({
           invoiceId: form.invoiceId || null,
           amount,
           trackingNumber: form.trackingNumber.trim() || null,
+          checkNumber: form.method === "CHECK" ? form.checkNumber.trim() || null : null,
+          checkIssuedAt: form.method === "CHECK" ? form.checkIssuedAt || null : null,
+          checkDueAt: form.method === "CHECK" ? form.checkDueAt || null : null,
+          payableTo: form.method === "CHECK" ? form.payableTo.trim() || null : null,
+          destinationDetails:
+            form.method === "CARD_TO_CARD" || form.method === "POS"
+              ? form.destinationDetails.trim() || null
+              : null,
           description: form.description.trim() || null,
           paidAt: new Date(form.paidAt).toISOString(),
         }),
@@ -363,17 +467,8 @@ export default function PaymentsClient({
     }
   }
 
-  const confirmedPayments = payments.filter(
-    (payment) => payment.status === "CONFIRMED"
-  );
-
-  const totalReceipts = confirmedPayments
-    .filter((payment) => payment.type === "RECEIPT")
-    .reduce((sum, payment) => sum + BigInt(payment.amount), BigInt(0));
-
-  const totalPayments = confirmedPayments
-    .filter((payment) => payment.type === "PAYMENT")
-    .reduce((sum, payment) => sum + BigInt(payment.amount), BigInt(0));
+  const totalReceipts = BigInt(serverStats.receipts);
+  const totalPayments = BigInt(serverStats.payments);
 
   return (
     <section dir="rtl" className="space-y-7">
@@ -428,7 +523,7 @@ export default function PaymentsClient({
             <Wallet className="text-blue-400" size={22} />
           </div>
           <p className="mt-3 text-2xl font-bold text-white">
-            {confirmedPayments.length.toLocaleString("fa-IR")}
+            {serverStats.confirmedCount.toLocaleString("fa-IR")}
           </p>
         </div>
       </div>
@@ -454,7 +549,10 @@ export default function PaymentsClient({
             />
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                paging.resetPages();
+                setSearch(event.target.value);
+              }}
               placeholder="جست‌وجوی طرف حساب، شماره پیگیری یا فاکتور..."
               className={`${inputClass} pr-11`}
             />
@@ -463,7 +561,10 @@ export default function PaymentsClient({
           <select
             value={typeFilter}
             onChange={(event) =>
-              setTypeFilter(event.target.value as "ALL" | PaymentType)
+              {
+                paging.resetPages();
+                setTypeFilter(event.target.value as "ALL" | PaymentType);
+              }
             }
             className={`${inputClass} lg:w-44`}
           >
@@ -475,9 +576,10 @@ export default function PaymentsClient({
           <select
             value={statusFilter}
             onChange={(event) =>
-              setStatusFilter(
-                event.target.value as "ALL" | PaymentStatus
-              )
+              {
+                paging.resetPages();
+                setStatusFilter(event.target.value as "ALL" | PaymentStatus);
+              }
             }
             className={`${inputClass} lg:w-44`}
           >
@@ -629,6 +731,14 @@ export default function PaymentsClient({
             </tbody>
           </table>
         </div>
+        <CursorPagination
+          total={totalCount}
+          page={paging.page}
+          hasNext={Boolean(paging.nextCursor)}
+          loading={loading}
+          onPrevious={paging.previousPage}
+          onNext={paging.nextPage}
+        />
       </div>
 
       {modalOpen && (
@@ -676,6 +786,12 @@ export default function PaymentsClient({
             </Field>
 
             <Field label="طرف حساب">
+              <input
+                value={contactSearch}
+                onChange={(event) => setContactSearch(event.target.value)}
+                placeholder="جست‌وجوی مخاطب..."
+                className={`${inputClass} mb-2`}
+              />
               <select
                 value={form.contactId}
                 onChange={(event) => handleContactChange(event.target.value)}
@@ -684,11 +800,21 @@ export default function PaymentsClient({
                 <option value="">بدون طرف حساب</option>
                 {contacts
                   .filter(
-                    (contact) =>
-                      contact.type === "BOTH" ||
-                      (form.type === "RECEIPT"
-                        ? contact.type === "CUSTOMER"
-                        : contact.type === "SUPPLIER")
+                    (contact) => {
+                      const query = contactSearch.trim().toLocaleLowerCase();
+                      const typeMatches =
+                        contact.type === "BOTH" ||
+                        (form.type === "RECEIPT"
+                          ? contact.type === "CUSTOMER"
+                          : contact.type === "SUPPLIER");
+                      return (
+                        typeMatches &&
+                        (!query ||
+                          contact.name.toLocaleLowerCase().includes(query) ||
+                          contact.phone?.includes(query) ||
+                          contact.email?.toLocaleLowerCase().includes(query))
+                      );
+                    }
                   )
                   .map((contact) => (
                     <option key={contact.id} value={contact.id}>
@@ -699,6 +825,12 @@ export default function PaymentsClient({
             </Field>
 
             <Field label="اتصال به فاکتور (اختیاری)">
+              <input
+                value={invoiceSearch}
+                onChange={(event) => setInvoiceSearch(event.target.value)}
+                placeholder="جست‌وجوی شماره یا طرف‌حساب فاکتور..."
+                className={`${inputClass} mb-2`}
+              />
               <select
                 value={form.invoiceId}
                 onChange={(event) =>
@@ -729,9 +861,8 @@ export default function PaymentsClient({
             )}
 
             <Field label={`مبلغ (${currencyLabel(currencyUnit)})`}>
-              <input
+              <NumericInput
                 required
-                type="number"
                 min="1"
                 step="1"
                 value={form.amount}
@@ -753,6 +884,27 @@ export default function PaymentsClient({
                 className={inputClass}
               />
             </Field>
+            {form.method === "CHECK" && (
+              <>
+                <Field label="شماره چک">
+                  <input required maxLength={100} value={form.checkNumber} onChange={(event) => updateForm("checkNumber", event.target.value)} className={inputClass} />
+                </Field>
+                <Field label="تاریخ صدور چک">
+                  <input required type="date" value={form.checkIssuedAt} onChange={(event) => updateForm("checkIssuedAt", event.target.value)} className={inputClass} />
+                </Field>
+                <Field label="تاریخ سررسید چک">
+                  <input required type="date" min={form.checkIssuedAt || undefined} value={form.checkDueAt} onChange={(event) => updateForm("checkDueAt", event.target.value)} className={inputClass} />
+                </Field>
+                <Field label="در وجه">
+                  <input required maxLength={150} value={form.payableTo} onChange={(event) => updateForm("payableTo", event.target.value)} className={inputClass} />
+                </Field>
+              </>
+            )}
+            {(form.method === "CARD_TO_CARD" || form.method === "POS") && (
+              <Field label={form.method === "POS" ? "دستگاه و حساب متصل" : "حساب یا کارت مقصد"}>
+                <input maxLength={300} value={form.destinationDetails} onChange={(event) => updateForm("destinationDetails", event.target.value)} className={inputClass} />
+              </Field>
+            )}
 
             <Field label="تاریخ تراکنش">
               <DatePicker

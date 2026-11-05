@@ -18,6 +18,11 @@ import {
   CheckCircle2,
   Filter,
 } from "lucide-react";
+import CursorPagination from "@/components/shared/cursor-pagination";
+import NumericInput from "@/components/shared/numeric-input";
+import useCursorPage from "@/hooks/use-cursor-page";
+import useDebouncedValue from "@/hooks/use-debounced-value";
+import type { QuickAction } from "@/lib/quick-actions";
 import {
   ExpenseCategory,
   PaymentMethod,
@@ -153,8 +158,10 @@ const initialForm = {
 
 export default function ExpensesClient({
   currencyUnit,
+  quickAction,
 }: {
   currencyUnit: CurrencyUnit;
+  quickAction?: QuickAction | null;
 }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
@@ -169,15 +176,32 @@ export default function ExpensesClient({
   const [editing, setEditing] = useState<Expense | null>(null);
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(initialForm);
+  const [totalCount, setTotalCount] = useState(0);
+  const [serverStats, setServerStats] = useState<{
+    count: number;
+    cancelled: number;
+    total: string;
+  } | null>(null);
+  const debouncedSearch = useDebouncedValue(search);
+  const paging = useCursorPage();
 
-  const loadExpenses = useCallback(async () => {
+  useEffect(() => {
+    if (
+      quickAction?.action === "expense" &&
+      quickAction.targetView === "expenses"
+    ) openCreate();
+  }, [quickAction?.requestId, quickAction?.action]);
+
+  const loadExpenses = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     setError("");
 
     try {
       const params = new URLSearchParams();
 
-      if (search.trim()) params.set("search", search.trim());
+      params.set("limit", "50");
+      if (paging.cursor) params.set("cursor", paging.cursor);
+      if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
       if (categoryFilter !== "ALL") {
         params.set("category", categoryFilter);
       }
@@ -192,7 +216,7 @@ export default function ExpensesClient({
         }
       }
 
-      const response = await fetch(`/api/expenses?${params.toString()}`);
+      const response = await fetch(`/api/expenses?${params.toString()}`, { signal });
       const data = await response.json();
 
       if (!response.ok) {
@@ -200,27 +224,43 @@ export default function ExpensesClient({
       }
 
       setExpenses(data.expenses);
+      setTotalCount(data.total);
+      setServerStats(data.stats);
+      paging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return;
       setError(
         err instanceof Error ? err.message : "خطا در دریافت هزینه‌ها.",
       );
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [
-    search,
+    debouncedSearch,
     categoryFilter,
     statusFilter,
     appliedFilters,
     startDate,
     endDate,
+    paging.cursor,
+    paging.setNextCursor,
   ]);
 
   useEffect(() => {
-    void loadExpenses();
+    const controller = new AbortController();
+    void loadExpenses(controller.signal);
+    return () => controller.abort();
   }, [loadExpenses]);
 
   const stats = useMemo(() => {
+    if (serverStats) {
+      return {
+        total: BigInt(serverStats.total),
+        count: serverStats.count,
+        cancelled: serverStats.cancelled,
+      };
+    }
+
     const confirmed = expenses.filter(
       (expense) => expense.status === "CONFIRMED",
     );
@@ -237,7 +277,7 @@ export default function ExpensesClient({
         (expense) => expense.status === "CANCELLED",
       ).length,
     };
-  }, [expenses]);
+  }, [expenses, serverStats]);
 
   function openCreate() {
     setEditing(null);
@@ -395,7 +435,10 @@ export default function ExpensesClient({
             />
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                paging.resetPages();
+                setSearch(event.target.value);
+              }}
               placeholder="جست‌وجوی عنوان یا توضیحات..."
               className={`${inputClass} pr-10`}
             />
@@ -403,7 +446,10 @@ export default function ExpensesClient({
 
           <select
             value={categoryFilter}
-            onChange={(event) => setCategoryFilter(event.target.value)}
+            onChange={(event) => {
+              paging.resetPages();
+              setCategoryFilter(event.target.value);
+            }}
             className={inputClass}
           >
             <option value="ALL">همه دسته‌بندی‌ها</option>
@@ -416,7 +462,10 @@ export default function ExpensesClient({
 
           <select
             value={statusFilter}
-            onChange={(event) => setStatusFilter(event.target.value)}
+            onChange={(event) => {
+              paging.resetPages();
+              setStatusFilter(event.target.value);
+            }}
             className={inputClass}
           >
             <option value="ALL">همه وضعیت‌ها</option>
@@ -463,7 +512,10 @@ export default function ExpensesClient({
           </Field>
 
           <button
-            onClick={() => setAppliedFilters((value) => value + 1)}
+            onClick={() => {
+              paging.resetPages();
+              setAppliedFilters((value) => value + 1);
+            }}
             className="flex items-center justify-center gap-2 rounded-xl bg-white/10 px-4 py-3 text-sm text-white transition hover:bg-white/15 md:col-span-2 md:justify-self-center md:min-w-40"
           >
             <Filter size={16} />
@@ -579,6 +631,14 @@ export default function ExpensesClient({
             </table>
           </div>
         )}
+        <CursorPagination
+          total={totalCount}
+          page={paging.page}
+          hasNext={Boolean(paging.nextCursor)}
+          loading={loading}
+          onPrevious={paging.previousPage}
+          onNext={paging.nextPage}
+        />
       </div>
 
       {modalOpen && (
@@ -622,9 +682,8 @@ export default function ExpensesClient({
               </Field>
 
               <Field label={`مبلغ (${currencyUnit === "TOMAN" ? "تومان" : "ریال"})`}>
-                <input
+                <NumericInput
                   required
-                  type="number"
                   min="1"
                   step="1"
                   value={form.amount}

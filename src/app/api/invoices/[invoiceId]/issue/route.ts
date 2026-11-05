@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { MAX_CURRENCY_RIAL } from "@/lib/currency";
+import { z } from "zod";
 
 type RouteContext = {
   params: Promise<{ invoiceId: string }>;
@@ -57,7 +59,7 @@ function serializeInvoice(invoice: {
 }
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   context: RouteContext
 ) {
   try {
@@ -79,6 +81,22 @@ export async function POST(
 
     const { invoiceId } = await context.params;
     const businessId = user.business.id;
+    const bodyText = await request.text();
+    let requestBody: unknown = {};
+    if (bodyText) {
+      try {
+        requestBody = JSON.parse(bodyText);
+      } catch {
+        return NextResponse.json({ message: "درخواست صدور معتبر نیست." }, { status: 400 });
+      }
+    }
+    const parsedRequest = z.object({
+      shortageModes: z.record(z.string(), z.enum(["NEGATIVE", "BACKORDER"])).optional(),
+    }).safeParse(requestBody);
+    if (!parsedRequest.success) {
+      return NextResponse.json({ message: "روش مدیریت کسری موجودی معتبر نیست." }, { status: 400 });
+    }
+    const shortageModes = parsedRequest.data.shortageModes ?? {};
 
     const result = await prisma.$transaction(
       async (tx) => {
@@ -87,8 +105,23 @@ export async function POST(
             id: invoiceId,
             businessId,
           },
-          include: {
+          select: {
+            id: true,
+            businessId: true,
+            invoiceNumber: true,
+            type: true,
+            status: true,
+            invoiceDate: true,
+            total: true,
+            subtotal: true,
+            extraCosts: true,
+            discount: true,
+            paymentPlanRecorded: true,
             items: true,
+            payments: {
+              where: { status: { in: ["PENDING", "CONFIRMED"] } },
+              select: { id: true, method: true, amount: true, status: true },
+            },
           },
         });
 
@@ -98,6 +131,10 @@ export async function POST(
         }
         if (invoice.items.length === 0) {
           throw new Error("INVOICE_EMPTY");
+        }
+        const paymentTotal = invoice.payments.reduce((sum, payment) => sum + payment.amount, 0n);
+        if (invoice.paymentPlanRecorded && paymentTotal !== invoice.total) {
+          throw new Error("PAYMENTS_NOT_EQUAL");
         }
 
         const items = invoice.items as InvoiceItemData[];
@@ -165,6 +202,7 @@ export async function POST(
 
         // پردازش هر کالا فقط یک‌بار
         for (const [productId, group] of groupedItems) {
+          const shortageMode = shortageModes[productId];
           const product = await tx.product.findFirst({
             where: {
               id: productId,
@@ -195,59 +233,101 @@ export async function POST(
             );
 
             newStock = product.stock.add(group.quantity);
-            newInventoryValue = product.inventoryValue + totalCost;
-
-            newAverageCost = new Prisma.Decimal(
-              newInventoryValue.toString()
-            ).div(newStock);
+            if (product.stock.lessThan(0)) {
+              const remainingQuantity = newStock.greaterThan(0) ? newStock : new Prisma.Decimal(0);
+              const groupUnits = BigInt(group.quantity.mul(1_000_000).toFixed(0));
+              const remainingUnits = BigInt(remainingQuantity.mul(1_000_000).toFixed(0));
+              newInventoryValue = groupUnits > 0n
+                ? (totalCost * remainingUnits) / groupUnits
+                : 0n;
+            } else {
+              newInventoryValue = product.inventoryValue + totalCost;
+            }
+            newAverageCost = newStock.greaterThan(0)
+              ? new Prisma.Decimal(newInventoryValue.toString()).div(newStock)
+              : new Prisma.Decimal(0);
           } else {
-            if (product.stock.lessThan(group.quantity)) {
-              throw new Error("INSUFFICIENT_STOCK");
+            if (product.stock.lessThan(group.quantity) && !shortageMode) {
+              throw new Error("SHORTAGE_MODE_REQUIRED");
             }
 
-            newStock = product.stock.sub(group.quantity);
-
-            // در صورت خروج تمام موجودی، ارزش دقیق باقی‌مانده صفر می‌شود
-            totalCost = group.quantity.equals(product.stock)
+            const available = product.stock.greaterThan(0)
+              ? Prisma.Decimal.min(product.stock, group.quantity)
+              : new Prisma.Decimal(0);
+            const quantityToDeduct = shortageMode === "BACKORDER" && product.stock.lessThan(group.quantity)
+              ? available
+              : group.quantity;
+            const costQuantity = available;
+            newStock = product.stock.sub(quantityToDeduct);
+            const calculatedCost = costQuantity.equals(product.stock) && product.stock.greaterThan(0)
               ? product.inventoryValue
-              : BigInt(
-                  product.averageCost
-                    .mul(group.quantity)
-                    .toFixed(0, Prisma.Decimal.ROUND_HALF_UP)
-                );
-
-            if (totalCost > product.inventoryValue) {
-              totalCost = product.inventoryValue;
+              : BigInt(product.averageCost.mul(costQuantity).toFixed(0, Prisma.Decimal.ROUND_HALF_UP));
+            totalCost = calculatedCost > product.inventoryValue
+              ? product.inventoryValue
+              : calculatedCost;
+            if (product.stock.greaterThan(0) && quantityToDeduct.greaterThanOrEqualTo(product.stock)) {
+              newInventoryValue = 0n;
+              newStock = new Prisma.Decimal(0);
+            } else {
+              newInventoryValue = product.inventoryValue - totalCost;
             }
-
-            newInventoryValue = product.inventoryValue - totalCost;
-
-            newAverageCost = newStock.isZero()
+            newAverageCost = newStock.lessThanOrEqualTo(0)
               ? new Prisma.Decimal(0)
-              : new Prisma.Decimal(newInventoryValue.toString()).div(
-                  newStock
-                );
+              : new Prisma.Decimal(newInventoryValue.toString()).div(newStock);
 
             // تخصیص بهای تمام‌شده فروش بین ردیف‌های همان کالا
-            const itemCosts = allocateAmount(
-              totalCost,
-              group.items.map((item) =>
-                BigInt(
-                  item.quantity
-                    .mul(1_000_000)
-                    .toFixed(0, Prisma.Decimal.ROUND_HALF_UP)
-                )
-              )
+            let remainingForCost = available;
+            const costedQuantities = group.items.map((item) => {
+              const supplied = remainingForCost.greaterThan(0)
+                ? Prisma.Decimal.min(item.quantity, remainingForCost)
+                : new Prisma.Decimal(0);
+              remainingForCost = remainingForCost.sub(supplied);
+              return supplied;
+            });
+            const costWeights = costedQuantities.map((quantity) =>
+              BigInt(quantity.mul(1_000_000).toFixed(0, Prisma.Decimal.ROUND_HALF_UP))
             );
+            const itemCosts = totalCost === 0n
+              ? group.items.map(() => 0n)
+              : allocateAmount(totalCost, costWeights);
 
             for (let i = 0; i < group.items.length; i++) {
               await tx.invoiceItem.update({
                 where: { id: group.items[i].id },
                 data: {
                   costOfGoodsSold: itemCosts[i],
+                  costedQuantity: costedQuantities[i],
                 },
               });
             }
+
+            if (shortageMode === "BACKORDER" && group.quantity.greaterThan(available)) {
+              let remainingAvailable = available;
+              for (const item of group.items) {
+                const itemAvailable = remainingAvailable.greaterThan(0)
+                  ? Prisma.Decimal.min(item.quantity, remainingAvailable)
+                  : new Prisma.Decimal(0);
+                remainingAvailable = remainingAvailable.sub(itemAvailable);
+                const itemOutstanding = item.quantity.sub(itemAvailable);
+                if (itemOutstanding.greaterThan(0)) {
+                  await tx.backorder.create({
+                    data: {
+                      businessId,
+                      invoiceId: invoice.id,
+                      invoiceItemId: item.id,
+                      productId,
+                      requested: item.quantity,
+                      fulfilled: itemAvailable,
+                      outstanding: itemOutstanding,
+                    },
+                  });
+                }
+              }
+            }
+          }
+
+          if (newInventoryValue > MAX_CURRENCY_RIAL || newInventoryValue < 0n) {
+            throw new Error("INVENTORY_VALUE_OVERFLOW");
           }
 
           // به‌روزرسانی اتمیک موجودی و ارزش آن
@@ -272,18 +352,23 @@ export async function POST(
           }
 
           // ثبت گردش انبار همراه با بهای تمام‌شده
-          await tx.inventoryMovement.create({
-            data: {
-              businessId,
-              productId,
-              invoiceId: invoice.id,
-              type: invoice.type === "PURCHASE" ? "PURCHASE" : "SALE",
-              quantity: group.quantity,
-              totalCost,
-              averageCost: newAverageCost,
-              description: `صدور فاکتور ${invoice.invoiceNumber}`,
-            },
-          });
+          const movementQuantity = invoice.type === "SALE" && shortageMode === "BACKORDER" && product.stock.lessThan(group.quantity)
+            ? (product.stock.greaterThan(0) ? Prisma.Decimal.min(product.stock, group.quantity) : new Prisma.Decimal(0))
+            : group.quantity;
+          if (movementQuantity.greaterThan(0)) {
+            await tx.inventoryMovement.create({
+              data: {
+                businessId,
+                productId,
+                invoiceId: invoice.id,
+                type: invoice.type === "PURCHASE" ? "PURCHASE" : "SALE",
+                quantity: movementQuantity,
+                totalCost,
+                averageCost: newAverageCost,
+                description: `صدور فاکتور ${invoice.invoiceNumber}`,
+              },
+            });
+          }
         }
 
         // صدور فاکتور فقط در صورت پیش‌نویس بودن
@@ -298,13 +383,40 @@ export async function POST(
           data: {
             status: "ISSUED",
             issuedAt,
-            costingRecordedAt:
-              invoice.type === "SALE" ? issuedAt : null,
+            costingRecordedAt: null,
           },
         });
-
         if (issued.count !== 1) {
           throw new Error("INVOICE_ALREADY_ISSUED");
+        }
+
+        await tx.payment.updateMany({
+          where: {
+            invoiceId: invoice.id,
+            businessId,
+            status: "PENDING",
+            allocationBatchId: null,
+          },
+          data: { allocationBatchId: crypto.randomUUID() },
+        });
+        await tx.payment.updateMany({
+          where: { invoiceId: invoice.id, status: "PENDING" },
+          data: { status: "CONFIRMED" },
+        });
+        if (invoice.type === "SALE") {
+          const items = await tx.invoiceItem.findMany({
+            where: { invoiceId: invoice.id },
+            select: { quantity: true, costedQuantity: true },
+          });
+          const allCosted = items.every(
+            (item) => item.costedQuantity.greaterThanOrEqualTo(item.quantity),
+          );
+          if (allCosted) {
+            await tx.invoice.updateMany({
+              where: { id: invoice.id, businessId, status: "ISSUED" },
+              data: { costingRecordedAt: issuedAt },
+            });
+          }
         }
 
         return tx.invoice.findUnique({
@@ -356,6 +468,14 @@ export async function POST(
           message: "موجودی یک یا چند کالا برای صدور فاکتور کافی نیست.",
           status: 409,
         },
+        SHORTAGE_MODE_REQUIRED: {
+          message: "برای کالای دارای کسری، روش ادامه (موجودی منفی یا ثبت کسری سفارش) را مشخص کنید.",
+          status: 409,
+        },
+        PAYMENTS_NOT_EQUAL: {
+          message: "مجموع روش‌های پرداخت باید دقیقاً با مبلغ فاکتور برابر باشد.",
+          status: 400,
+        },
         INVOICE_ALREADY_ISSUED: {
           message: "این فاکتور هم‌زمان توسط درخواست دیگری صادر شده است.",
           status: 409,
@@ -378,6 +498,10 @@ export async function POST(
         },
         INVALID_ALLOCATION: {
           message: "تقسیم هزینه بین اقلام فاکتور امکان‌پذیر نیست.",
+          status: 400,
+        },
+        INVENTORY_VALUE_OVERFLOW: {
+          message: "ارزش موجودی از محدوده مجاز سامانه بیشتر است.",
           status: 400,
         },
         STOCK_CONFLICT: {

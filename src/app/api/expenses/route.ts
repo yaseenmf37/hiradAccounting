@@ -3,17 +3,24 @@ import {
   ExpenseCategory,
   ExpenseStatus,
   PaymentMethod,
+  Prisma,
 } from "@prisma/client";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { toRial } from "@/lib/currency";
+import {
+  getCursorPage,
+  parseCursorPageParams,
+} from "@/lib/cursor-pagination";
 
 const createExpenseSchema = z.object({
   title: z.string().trim().min(2).max(150),
   category: z.nativeEnum(ExpenseCategory),
   amount: z.number().int().positive().safe(),
-  method: z.nativeEnum(PaymentMethod),
+  method: z.nativeEnum(PaymentMethod).refine(
+    (method) => method !== PaymentMethod.LEDGER,
+  ),
   description: z.string().trim().max(1000).optional().nullable(),
   spentAt: z.string().datetime().optional(),
 });
@@ -62,6 +69,14 @@ export async function GET(request: Request) {
     const search = searchParams.get("search")?.trim();
     const startDate = searchParams.get("startDate");
     const endDate = searchParams.get("endDate");
+    const pagination = parseCursorPageParams(searchParams);
+
+    if (!pagination) {
+      return NextResponse.json(
+        { error: "محدوده صفحه‌بندی معتبر نیست." },
+        { status: 400 },
+      );
+    }
 
     if (
       category &&
@@ -108,8 +123,7 @@ export async function GET(request: Request) {
       );
     }
 
-    const expenses = await prisma.expense.findMany({
-      where: {
+    const where: Prisma.ExpenseWhereInput = {
         businessId,
         ...(category && category !== "ALL"
           ? { category: category as ExpenseCategory }
@@ -137,13 +151,55 @@ export async function GET(request: Request) {
               },
             }
           : {}),
+      };
+
+    const [rows, total, groupedStats] = await prisma.$transaction([
+      prisma.expense.findMany({
+        where,
+        orderBy: [{ spentAt: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+        take: pagination.limit + 1,
+        ...(pagination.cursor
+          ? { cursor: { id: pagination.cursor }, skip: 1 }
+          : {}),
+      }),
+      prisma.expense.count({ where }),
+      prisma.expense.groupBy({
+        by: ["status"] as const,
+        where,
+        orderBy: { status: "asc" },
+        _sum: { amount: true },
+        _count: { _all: true },
+      }),
+    ]);
+    const page = getCursorPage(rows, pagination.limit);
+    const stats = groupedStats.reduce(
+      (result, group) => {
+        const count =
+          typeof group._count === "object" && group._count
+            ? group._count._all ?? 0
+            : 0;
+        result.count += count;
+        if (group.status === ExpenseStatus.CONFIRMED) {
+          result.confirmed += count;
+          result.total += group._sum?.amount ?? 0n;
+        } else {
+          result.cancelled += count;
+        }
+        return result;
       },
-      orderBy: [{ spentAt: "desc" }, { createdAt: "desc" }],
-    });
+      { count: 0, confirmed: 0, cancelled: 0, total: 0n },
+    );
 
     return NextResponse.json({
-      expenses: expenses.map(serializeExpense),
-      total: expenses.length,
+      expenses: page.items.map(serializeExpense),
+      total,
+      nextCursor: page.nextCursor,
+      stats: {
+        count: stats.confirmed,
+        confirmed: stats.confirmed,
+        cancelled: stats.cancelled,
+        total: stats.total.toString(),
+      },
     });
   } catch (error) {
     console.error("GET /api/expenses error:", error);

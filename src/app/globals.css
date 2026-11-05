@@ -36,3 +36,102 @@ button {
   background: #166534;
   color: white;
 }
+
+.print-only {
+  display: none;
+}
+
+@page {
+  size: A4;
+  margin: 14mm;
+}
+
+@media print {
+  html,
+  body {
+    background: white !important;
+    color: #111 !important;
+    direction: rtl;
+  }
+
+  body * {
+    visibility: hidden !important;
+  }
+
+  .print-only,
+  .print-only * {
+    visibility: visible !important;
+  }
+
+  .print-only {
+    display: block !important;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    padding: 0;
+    color: #111 !important;
+    background: white !important;
+    font: 12px Tahoma, Arial, sans-serif;
+  }
+
+  .print-only h1 {
+    margin: 0 0 12px;
+    font-size: 20px;
+  }
+
+  .print-invoice-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    padding-bottom: 16px;
+    border-bottom: 2px solid #222;
+  }
+
+  .print-invoice-header p,
+  .print-invoice-meta p,
+  .print-invoice-totals p,
+  .print-invoice-payments p {
+    margin: 6px 0;
+  }
+
+  .print-invoice-table {
+    width: 100%;
+    margin-top: 20px;
+    border-collapse: collapse;
+  }
+
+  .print-invoice-table th,
+  .print-invoice-table td {
+    padding: 8px;
+    border: 1px solid #777;
+    text-align: right;
+  }
+
+  .print-invoice-table th {
+    background: #eee !important;
+    print-color-adjust: exact;
+  }
+
+  .print-invoice-totals {
+    width: 50%;
+    margin: 18px 0 0 auto;
+  }
+
+  .print-invoice-totals strong {
+    display: block;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #555;
+    font-size: 14px;
+  }
+
+  .print-invoice-payments {
+    margin-top: 18px;
+  }
+
+  .print-invoice-signatures {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 64px;
+  }
+}

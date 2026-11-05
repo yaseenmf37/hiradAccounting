@@ -17,7 +17,9 @@ const updateExpenseSchema = z.object({
   title: z.string().trim().min(2).max(150).optional(),
   category: z.nativeEnum(ExpenseCategory).optional(),
   amount: z.number().int().positive().safe().optional(),
-  method: z.nativeEnum(PaymentMethod).optional(),
+  method: z.nativeEnum(PaymentMethod).refine(
+    (method) => method !== PaymentMethod.LEDGER,
+  ).optional(),
   description: z.string().trim().max(1000).nullable().optional(),
   spentAt: z.string().datetime().optional(),
 });

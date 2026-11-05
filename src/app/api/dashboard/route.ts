@@ -1,5 +1,6 @@
 
 import { NextResponse } from "next/server";
+import { unstable_rethrow } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
@@ -46,10 +47,15 @@ export async function GET() {
     const [
       currentInvoices,
       previousInvoices,
+      currentPurchaseReturns,
+      previousPurchaseReturns,
+      currentSalesReturns,
+      previousSalesReturns,
       currentExpenses,
       previousExpenses,
       productCount,
       monthlyInvoices,
+      monthlySalesReturns,
       recentInvoices,
     ] = await Promise.all([
       prisma.invoice.groupBy({
@@ -57,7 +63,7 @@ export async function GET() {
         where: {
           businessId,
           status: "ISSUED",
-          issuedAt: { gte: currentMonth },
+          invoiceDate: { gte: currentMonth },
         },
         _sum: { total: true },
       }),
@@ -67,13 +73,36 @@ export async function GET() {
         where: {
           businessId,
           status: "ISSUED",
-          issuedAt: {
+          invoiceDate: {
             gte: previousMonth,
             lt: currentMonth,
           },
         },
         _sum: { total: true },
       }),
+
+      prisma.purchaseReturn.aggregate({
+        where: { businessId, createdAt: { gte: currentMonth } },
+        _sum: { total: true },
+      }),
+
+      prisma.purchaseReturn.aggregate({
+        where: { businessId, createdAt: { gte: previousMonth, lt: currentMonth } },
+        _sum: { total: true },
+      }),
+
+      prisma.$queryRaw<{ amount: bigint }[]>`
+        SELECT COALESCE(SUM("total"), 0) AS amount
+        FROM "SalesReturn"
+        WHERE "businessId" = ${businessId} AND "createdAt" >= ${currentMonth}
+      `,
+
+      prisma.$queryRaw<{ amount: bigint }[]>`
+        SELECT COALESCE(SUM("total"), 0) AS amount
+        FROM "SalesReturn"
+        WHERE "businessId" = ${businessId}
+          AND "createdAt" >= ${previousMonth} AND "createdAt" < ${currentMonth}
+      `,
 
       prisma.expense.aggregate({
         where: {
@@ -103,19 +132,30 @@ export async function GET() {
         },
       }),
 
-      prisma.invoice.findMany({
-        where: {
-          businessId,
-          type: "SALE",
-          status: "ISSUED",
-          issuedAt: { gte: eightMonthsAgo },
-        },
-        select: {
-          total: true,
-          issuedAt: true,
-        },
-        orderBy: { issuedAt: "asc" },
-      }),
+      prisma.$queryRaw<{ month: string; total: bigint }[]>`
+        SELECT
+          to_char(
+            date_trunc('month', "invoiceDate"),
+            'YYYY-MM'
+          ) AS "month",
+          SUM("total") AS "total"
+        FROM "Invoice"
+        WHERE "businessId" = ${businessId}
+          AND "type" = 'SALE'
+          AND "status" = 'ISSUED'
+          AND "invoiceDate" >= ${eightMonthsAgo}
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `,
+
+      prisma.$queryRaw<{ month: string; total: bigint }[]>`
+        SELECT to_char(date_trunc('month', "createdAt"), 'YYYY-MM') AS "month",
+          SUM("total") AS "total"
+        FROM "SalesReturn"
+        WHERE "businessId" = ${businessId} AND "createdAt" >= ${eightMonthsAgo}
+        GROUP BY 1
+        ORDER BY 1 ASC
+      `,
 
       prisma.invoice.findMany({
         where: { businessId },
@@ -126,7 +166,7 @@ export async function GET() {
           status: true,
           total: true,
           createdAt: true,
-          issuedAt: true,
+          invoiceDate: true,
           contact: {
             select: { name: true },
           },
@@ -135,10 +175,11 @@ export async function GET() {
             select: {
               amount: true,
               type: true,
+              method: true,
             },
           },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy: { invoiceDate: "desc" },
         take: 5,
       }),
     ]);
@@ -149,10 +190,16 @@ export async function GET() {
     ) =>
       rows.find((row) => row.type === type)?._sum.total ?? 0n;
 
-    const currentSales = getInvoiceTotal(currentInvoices, "SALE");
-    const previousSales = getInvoiceTotal(previousInvoices, "SALE");
-    const currentPurchases = getInvoiceTotal(currentInvoices, "PURCHASE");
-    const previousPurchases = getInvoiceTotal(previousInvoices, "PURCHASE");
+    const currentSales = getInvoiceTotal(currentInvoices, "SALE") -
+      (currentSalesReturns[0]?.amount ?? 0n);
+    const previousSales = getInvoiceTotal(previousInvoices, "SALE") -
+      (previousSalesReturns[0]?.amount ?? 0n);
+    const currentPurchases =
+      getInvoiceTotal(currentInvoices, "PURCHASE") -
+      (currentPurchaseReturns._sum.total ?? 0n);
+    const previousPurchases =
+      getInvoiceTotal(previousInvoices, "PURCHASE") -
+      (previousPurchaseReturns._sum.total ?? 0n);
 
     const currentExpenseTotal = currentExpenses._sum.amount ?? 0n;
     const previousExpenseTotal = previousExpenses._sum.amount ?? 0n;
@@ -166,14 +213,18 @@ export async function GET() {
     }
 
     for (const invoice of monthlyInvoices) {
-      if (!invoice.issuedAt) continue;
-
-      const key = `${invoice.issuedAt.getUTCFullYear()}-${invoice.issuedAt.getUTCMonth()}`;
+      const [year, month] = invoice.month.split("-").map(Number);
+      const key = `${year}-${month - 1}`;
 
       salesByMonth.set(
         key,
         (salesByMonth.get(key) ?? 0n) + invoice.total
       );
+    }
+    for (const salesReturn of monthlySalesReturns) {
+      const [year, month] = salesReturn.month.split("-").map(Number);
+      const key = `${year}-${month - 1}`;
+      salesByMonth.set(key, (salesByMonth.get(key) ?? 0n) - salesReturn.total);
     }
 
     const salesTrend = Array.from(salesByMonth.entries()).map(
@@ -197,7 +248,7 @@ export async function GET() {
 
       const paidAmount = invoice.payments.reduce(
         (sum, payment) =>
-          payment.type === expectedPaymentType
+          payment.type === expectedPaymentType && payment.method !== "LEDGER"
             ? sum + payment.amount
             : sum,
         0n
@@ -222,7 +273,7 @@ export async function GET() {
         status: paymentStatus,
         amount: invoice.total.toString(),
         contactName: invoice.contact?.name ?? "بدون طرف حساب",
-        date: (invoice.issuedAt ?? invoice.createdAt).toISOString(),
+        date: invoice.invoiceDate.toISOString(),
       };
     });
 
@@ -255,6 +306,7 @@ export async function GET() {
       recentInvoices: serializedInvoices,
     });
   } catch (error) {
+    unstable_rethrow(error);
     console.error("DASHBOARD_API_ERROR:", error);
 
     return NextResponse.json(

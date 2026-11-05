@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import {
+  Prisma,
   PaymentMethod,
   PaymentStatus,
   PaymentType,
@@ -9,6 +10,10 @@ import {
 import { getCurrentUser } from "@/lib/auth";
 import { toRial } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";
+import {
+  getCursorPage,
+  parseCursorPageParams,
+} from "@/lib/cursor-pagination";
 
 const paymentSchema = z.object({
   contactId: z.string().optional().nullable(),
@@ -17,6 +22,11 @@ const paymentSchema = z.object({
   method: z.nativeEnum(PaymentMethod),
   amount: z.number().int().positive().safe(),
   trackingNumber: z.string().trim().max(100).optional().nullable(),
+  checkNumber: z.string().trim().max(100).optional().nullable(),
+  checkIssuedAt: z.string().date().optional().nullable(),
+  checkDueAt: z.string().date().optional().nullable(),
+  payableTo: z.string().trim().max(150).optional().nullable(),
+  destinationDetails: z.string().trim().max(300).optional().nullable(),
   description: z.string().trim().max(1000).optional().nullable(),
   paidAt: z.string().datetime().optional(),
 });
@@ -31,6 +41,11 @@ function serializePayment(payment: {
   status: PaymentStatus;
   amount: bigint;
   trackingNumber: string | null;
+  checkNumber?: string | null;
+  checkIssuedAt?: Date | null;
+  checkDueAt?: Date | null;
+  payableTo?: string | null;
+  destinationDetails?: string | null;
   description: string | null;
   paidAt: Date;
   createdAt: Date;
@@ -49,6 +64,8 @@ function serializePayment(payment: {
   return {
     ...payment,
     amount: payment.amount.toString(),
+    checkIssuedAt: payment.checkIssuedAt?.toISOString() ?? null,
+    checkDueAt: payment.checkDueAt?.toISOString() ?? null,
     paidAt: payment.paidAt.toISOString(),
     createdAt: payment.createdAt.toISOString(),
     updatedAt: payment.updatedAt.toISOString(),
@@ -80,6 +97,14 @@ export async function GET(request: NextRequest) {
     const contactId = searchParams.get("contactId");
     const invoiceId = searchParams.get("invoiceId");
     const search = searchParams.get("search")?.trim();
+    const pagination = parseCursorPageParams(searchParams);
+
+    if (!pagination) {
+      return NextResponse.json(
+        { error: "محدوده صفحه‌بندی معتبر نیست." },
+        { status: 400 },
+      );
+    }
 
     if (type && !Object.values(PaymentType).includes(type as PaymentType)) {
       return NextResponse.json(
@@ -98,9 +123,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const payments = await prisma.payment.findMany({
-      where: {
+    const where: Prisma.PaymentWhereInput = {
         businessId: user.business.id,
+        method: { not: PaymentMethod.LEDGER },
         ...(type ? { type: type as PaymentType } : {}),
         ...(status ? { status: status as PaymentStatus } : {}),
         ...(contactId ? { contactId } : {}),
@@ -126,25 +151,66 @@ export async function GET(request: NextRequest) {
               ],
             }
           : {}),
-      },
-      include: {
-        contact: { select: { id: true, name: true } },
-        invoice: {
-          select: {
-            id: true,
-            invoiceNumber: true,
-            type: true,
-            status: true,
-            total: true,
+      };
+
+    const [rows, total, groupedPayments] = await prisma.$transaction([
+      prisma.payment.findMany({
+        where,
+        include: {
+          contact: { select: { id: true, name: true } },
+          invoice: {
+            select: {
+              id: true,
+              invoiceNumber: true,
+              type: true,
+              status: true,
+              total: true,
+            },
           },
         },
+        orderBy: [{ paidAt: "desc" }, { id: "desc" }],
+        take: pagination.limit + 1,
+        ...(pagination.cursor
+          ? { cursor: { id: pagination.cursor }, skip: 1 }
+          : {}),
+      }),
+      prisma.payment.count({ where }),
+      prisma.payment.groupBy({
+        by: ["type", "status"] as const,
+        where,
+        orderBy: [{ type: "asc" }, { status: "asc" }],
+        _sum: { amount: true },
+        _count: { _all: true },
+      }),
+    ]);
+    const page = getCursorPage(rows, pagination.limit);
+    const stats = groupedPayments.reduce(
+      (result, group) => {
+        if (group.status !== PaymentStatus.CONFIRMED) return result;
+        const count =
+          typeof group._count === "object" && group._count
+            ? group._count._all ?? 0
+            : 0;
+        result.confirmedCount += count;
+        if (group.type === PaymentType.RECEIPT) {
+          result.receipts += group._sum?.amount ?? 0n;
+        } else {
+          result.payments += group._sum?.amount ?? 0n;
+        }
+        return result;
       },
-      orderBy: { paidAt: "desc" },
-    });
+      { receipts: 0n, payments: 0n, confirmedCount: 0 },
+    );
 
     return NextResponse.json({
-      payments: payments.map(serializePayment),
-      total: payments.length,
+      payments: page.items.map(serializePayment),
+      total,
+      nextCursor: page.nextCursor,
+      stats: {
+        receipts: stats.receipts.toString(),
+        payments: stats.payments.toString(),
+        confirmedCount: stats.confirmedCount,
+      },
     });
   } catch (error) {
     console.error("GET /api/payments error:", error);
@@ -180,6 +246,27 @@ export async function POST(request: NextRequest) {
     }
 
     const data = parsed.data;
+    if (data.method === PaymentMethod.LEDGER) {
+      return NextResponse.json(
+        { error: "ثبت حساب دفتری فقط از طریق برنامه پرداخت فاکتور امکان‌پذیر است." },
+        { status: 400 },
+      );
+    }
+    if (
+      data.method === PaymentMethod.CHECK &&
+      (!data.checkNumber || !data.checkIssuedAt || !data.checkDueAt || !data.payableTo)
+    ) {
+      return NextResponse.json(
+        { error: "برای پرداخت با چک، شماره، تاریخ صدور، سررسید و در وجه الزامی است." },
+        { status: 400 },
+      );
+    }
+    if (data.checkIssuedAt && data.checkDueAt && data.checkDueAt < data.checkIssuedAt) {
+      return NextResponse.json(
+        { error: "تاریخ سررسید چک نمی‌تواند قبل از تاریخ صدور باشد." },
+        { status: 400 },
+      );
+    }
     const businessId = user.business.id;
 
     const business = await prisma.business.findFirst({
@@ -213,7 +300,7 @@ export async function POST(request: NextRequest) {
             contact: { select: { id: true } },
             payments: {
               where: { status: PaymentStatus.CONFIRMED },
-              select: { amount: true },
+              select: { amount: true, method: true },
             },
           },
         });
@@ -244,7 +331,8 @@ export async function POST(request: NextRequest) {
         }
 
         const alreadyPaid = invoice.payments.reduce(
-          (sum, item) => sum + item.amount,
+          (sum, item) =>
+            item.method === PaymentMethod.LEDGER ? sum : sum + item.amount,
           BigInt(0),
         );
 
@@ -273,6 +361,20 @@ export async function POST(request: NextRequest) {
           method: data.method,
           amount,
           trackingNumber: data.trackingNumber || null,
+          checkNumber: data.method === PaymentMethod.CHECK
+            ? data.checkNumber || data.trackingNumber || null
+            : null,
+          checkIssuedAt: data.method === PaymentMethod.CHECK && data.checkIssuedAt
+            ? new Date(`${data.checkIssuedAt}T00:00:00.000Z`)
+            : null,
+          checkDueAt: data.method === PaymentMethod.CHECK && data.checkDueAt
+            ? new Date(`${data.checkDueAt}T00:00:00.000Z`)
+            : null,
+          payableTo: data.method === PaymentMethod.CHECK ? data.payableTo || null : null,
+          destinationDetails:
+            data.method === PaymentMethod.CARD_TO_CARD || data.method === PaymentMethod.POS
+              ? data.destinationDetails || null
+              : null,
           description: data.description || null,
           paidAt: data.paidAt ? new Date(data.paidAt) : new Date(),
         },
@@ -289,7 +391,7 @@ export async function POST(request: NextRequest) {
           },
         },
       });
-    });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
     return NextResponse.json(
       { payment: serializePayment(payment) },
@@ -314,6 +416,15 @@ export async function POST(request: NextRequest) {
           { status: 400 },
         );
       }
+    }
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2034"
+    ) {
+      return NextResponse.json(
+        { error: "فاکتور هم‌زمان تغییر کرده؛ اطلاعات را تازه‌سازی کنید." },
+        { status: 409 },
+      );
     }
 
     console.error("POST /api/payments error:", error);

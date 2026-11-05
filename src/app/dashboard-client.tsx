@@ -1,5 +1,8 @@
 "use client";
 
+import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
+
 import {
   LayoutDashboard,
   Package,
@@ -18,29 +21,60 @@ import {
   LogOut,
   KeyRound,
   X,
+  Menu as MenuIcon,
   UserRound,
   RefreshCw,
 } from "lucide-react";
 
-import {
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
-
 import { useEffect, useState } from "react";
 import type { ElementType } from "react";
+import type { QuickAction } from "@/lib/quick-actions";
 
-import InventoryClient from "@/components/inventory/inventory-client";
-import ContactsClient from "@/components/contacts/contacts-client";
-import InvoicesClient from "@/components/invoices/invoices-client";
-import PaymentsClient from "@/components/payments/payments-client";
-import ExpensesClient from "@/components/expenses/expenses-client";
-import ReportsClient from "@/components/reports/reports-client";
+function SectionLoading() {
+  return (
+    <div
+      role="status"
+      className="rounded-2xl border border-[#222d38] bg-[#111820] p-8 text-center text-sm text-slate-400"
+    >
+      در حال بارگذاری بخش...
+    </div>
+  );
+}
+
+const InventoryClient = dynamic(
+  () => import("@/components/inventory/inventory-client"),
+  { loading: SectionLoading }
+);
+const ContactsClient = dynamic(
+  () => import("@/components/contacts/contacts-client"),
+  { loading: SectionLoading }
+);
+const InvoicesClient = dynamic(
+  () => import("@/components/invoices/invoices-client"),
+  { loading: SectionLoading }
+);
+const PaymentsClient = dynamic(
+  () => import("@/components/payments/payments-client"),
+  { loading: SectionLoading }
+);
+const ExpensesClient = dynamic(
+  () => import("@/components/expenses/expenses-client"),
+  { loading: SectionLoading }
+);
+const ReportsClient = dynamic(
+  () => import("@/components/reports/reports-client"),
+  { loading: SectionLoading }
+);
+const DashboardSalesChart = dynamic(
+  () => import("@/components/dashboard/sales-chart"),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-sm text-slate-500">
+        در حال بارگذاری نمودار...
+      </div>
+    ),
+  }
+);
 
 const menu = [
   { title: "داشبورد", icon: LayoutDashboard },
@@ -103,9 +137,8 @@ type CurrentView =
   | "expenses"
   | "reports";
 
-function formatAmount(amount: string | number, unit: CurrencyUnit) {
-  let value = BigInt(Math.round(Number(amount)));
-
+function formatAmount(amount: string, unit: CurrencyUnit) {
+  let value = BigInt(amount);
   if (unit === "TOMAN") {
     value /= BigInt(10);
   }
@@ -231,9 +264,12 @@ function getInvoiceStatus(
 
 export default function DashboardClient({
   user,
+  initialView,
 }: {
   user: DashboardUser;
+  initialView: CurrentView;
 }) {
+  const router = useRouter();
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState("");
@@ -242,7 +278,11 @@ export default function DashboardClient({
   const [currencySaving, setCurrencySaving] = useState(false);
   const [currencyError, setCurrencyError] = useState("");
   const [currencySuccess, setCurrencySuccess] = useState("");
-  const [currentView, setCurrentView] = useState<CurrentView>("dashboard");
+  const [currentView, setCurrentView] = useState<CurrentView>(initialView);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [visitedViews, setVisitedViews] = useState<CurrentView[]>([initialView]);
+  const [quickAction, setQuickAction] = useState<QuickAction | null>(null);
+  const [quickActionRequestId, setQuickActionRequestId] = useState(0);
 
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState("");
@@ -296,6 +336,27 @@ export default function DashboardClient({
 
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    setCurrentView(initialView);
+    setVisitedViews((previous) =>
+      previous.includes(initialView) ? previous : [...previous, initialView]
+    );
+  }, [initialView]);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileMenuOpen]);
 
   async function handleChangePassword(
     event: React.FormEvent<HTMLFormElement>
@@ -360,8 +421,20 @@ export default function DashboardClient({
     }
   }
 
-  function navigateTo(view: CurrentView) {
+  function navigateTo(view: CurrentView, action?: QuickAction["action"]) {
+    setMobileMenuOpen(false);
     setCurrentView(view);
+    setVisitedViews((previous) =>
+      previous.includes(view) ? previous : [...previous, view]
+    );
+    if (window.location.search !== `?view=${encodeURIComponent(view)}`) {
+      router.push(`/?view=${encodeURIComponent(view)}`, { scroll: false });
+    }
+    if (action && view !== "dashboard" && view !== "reports") {
+      const requestId = quickActionRequestId + 1;
+      setQuickActionRequestId(requestId);
+      setQuickAction({ action, requestId, targetView: view });
+    }
   }
 
   const currencyUnit = dashboard?.currencyUnit ?? "TOMAN";
@@ -404,6 +477,36 @@ export default function DashboardClient({
     };
 
   const activeView = viewTitles[currentView];
+  const viewByTitle: Record<string, CurrentView> = {
+    داشبورد: "dashboard",
+    "مدیریت انبار": "inventory",
+    "فاکتور خرید": "purchase-invoices",
+    "فاکتور فروش": "sales-invoices",
+    مشتریان: "contacts",
+    "گزارش‌های مالی": "reports",
+    "دریافت و پرداخت": "payments",
+    "مدیریت هزینه‌ها": "expenses",
+  };
+  const renderNavigation = () => menu.map((item) => {
+    const targetView = viewByTitle[item.title];
+    const isActive = currentView === targetView;
+    return (
+      <button
+        key={item.title}
+        type="button"
+        onClick={() => navigateTo(targetView)}
+        aria-current={isActive ? "page" : undefined}
+        className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-right text-sm transition ${
+          isActive
+            ? "bg-green-500/10 text-green-400"
+            : "text-slate-400 hover:bg-[#1b2732] hover:text-white"
+        }`}
+      >
+        <item.icon size={19} />
+        <span>{item.title}</span>
+      </button>
+    );
+  });
 
   return (
     <main className="min-h-screen bg-[#0b0f14] text-slate-100">
@@ -428,38 +531,8 @@ export default function DashboardClient({
             منوی اصلی
           </p>
 
-          <nav className="space-y-1">
-            {menu.map((item) => {
-              const viewByTitle: Record<string, CurrentView> = {
-                داشبورد: "dashboard",
-                "مدیریت انبار": "inventory",
-                "فاکتور خرید": "purchase-invoices",
-                "فاکتور فروش": "sales-invoices",
-                مشتریان: "contacts",
-                "گزارش‌های مالی": "reports",
-                "دریافت و پرداخت": "payments",
-                "مدیریت هزینه‌ها": "expenses",
-              };
-
-              const targetView = viewByTitle[item.title];
-              const isActive = currentView === targetView;
-
-              return (
-                <button
-                  key={item.title}
-                  type="button"
-                  onClick={() => navigateTo(targetView)}
-                  className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-right text-sm transition ${
-                    isActive
-                      ? "bg-green-500/10 text-green-400"
-                      : "text-slate-400 hover:bg-[#1b2732] hover:text-white"
-                  }`}
-                >
-                  <item.icon size={19} />
-                  <span>{item.title}</span>
-                </button>
-              );
-            })}
+          <nav className="space-y-1" aria-label="منوی اصلی">
+            {renderNavigation()}
           </nav>
         </div>
 
@@ -504,10 +577,92 @@ export default function DashboardClient({
         </div>
       </aside>
 
+      {mobileMenuOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            type="button"
+            aria-label="بستن منوی ناوبری"
+            onClick={() => setMobileMenuOpen(false)}
+            className="absolute inset-0 h-full w-full bg-black/70 backdrop-blur-sm"
+          />
+          <aside
+            id="mobile-navigation-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="منوی ناوبری"
+            className="absolute inset-y-0 right-0 flex h-dvh w-[min(85vw,320px)] flex-col border-l border-[#222d38] bg-[#111820] shadow-2xl"
+          >
+            <div className="flex h-[82px] items-center justify-between border-b border-[#222d38] px-5">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-green-500 text-black">
+                  <Wallet size={22} />
+                </div>
+                <div>
+                  <h1 className="text-lg font-bold text-white">Hirad Accounting</h1>
+                  <p className="text-[11px] text-slate-500">سیستم مدیریت مالی</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileMenuOpen(false)}
+                aria-label="بستن منو"
+                className="rounded-lg p-2 text-slate-400 hover:bg-white/5"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <nav className="space-y-1 overflow-y-auto p-4" aria-label="منوی اصلی">
+              {renderNavigation()}
+            </nav>
+            <div className="mt-auto border-t border-[#222d38] p-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setPasswordError("");
+                  setPasswordSuccess("");
+                  setSettingsOpen(true);
+                }}
+                className="flex w-full items-center gap-3 rounded-xl p-3 text-right transition hover:bg-[#1b2732]"
+              >
+                <Settings size={19} className="text-slate-400" />
+                <span className="text-sm text-slate-300">تنظیمات حساب</span>
+              </button>
+              <div className="mt-2 flex items-center gap-3 rounded-xl bg-[#1b2732] p-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold">{user.fullName}</p>
+                  <p className="truncate text-xs text-slate-500">{user.business?.name ?? "حساب کسب‌وکار"}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  aria-label="خروج از حساب"
+                  className="rounded-lg p-2 text-slate-400 transition hover:bg-red-500/10 hover:text-red-400"
+                >
+                  <LogOut size={18} />
+                </button>
+              </div>
+            </div>
+          </aside>
+        </div>
+      )}
+
       <section className="lg:mr-[255px]">
         <header className="sticky top-0 z-10 flex h-[82px] items-center justify-between border-b border-[#222d38] bg-[#0b0f14]/95 px-5 backdrop-blur-xl md:px-8">
           <div>
-            <h2 className="text-lg font-bold">{activeView.title}</h2>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                aria-label="باز کردن منوی ناوبری"
+                aria-expanded={mobileMenuOpen}
+                aria-controls="mobile-navigation-drawer"
+                onClick={() => setMobileMenuOpen(true)}
+                className="rounded-lg border border-[#263341] p-2 text-slate-300 hover:bg-[#1b2732] lg:hidden"
+              >
+                <MenuIcon size={20} />
+              </button>
+              <h2 className="text-lg font-bold">{activeView.title}</h2>
+            </div>
             <p className="mt-1 text-xs text-slate-500">
               {activeView.description}
             </p>
@@ -526,29 +681,101 @@ export default function DashboardClient({
         </header>
 
         <div className="space-y-7 p-5 md:p-8">
-          {currentView === "inventory" ? (
-            <InventoryClient currencyUnit={currencyUnit} />
-          ) : currentView === "purchase-invoices" ? (
-            <InvoicesClient
-              key="PURCHASE"
-              currencyUnit={currencyUnit}
-              initialType="PURCHASE"
-            />
-          ) : currentView === "sales-invoices" ? (
-            <InvoicesClient
-              key="SALE"
-              currencyUnit={currencyUnit}
-              initialType="SALE"
-            />
-          ) : currentView === "contacts" ? (
-            <ContactsClient currencyUnit={currencyUnit} />
-          ) : currentView === "payments" ? (
-            <PaymentsClient currencyUnit={currencyUnit} />
-          ) : currentView === "expenses" ? (
-            <ExpensesClient currencyUnit={currencyUnit} />
-          ) : currentView === "reports" ? (
-            <ReportsClient currencyUnit={currencyUnit} />
-          ) : (
+          {visitedViews.includes("inventory") && (
+            <section hidden={currentView !== "inventory"}>
+              <InventoryClient
+                currencyUnit={currencyUnit}
+                quickAction={
+                  quickAction?.targetView === "inventory" &&
+                  quickAction.action === "product"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("purchase-invoices") && (
+            <section hidden={currentView !== "purchase-invoices"}>
+              <InvoicesClient
+                key="PURCHASE"
+                currencyUnit={currencyUnit}
+                initialType="PURCHASE"
+                quickAction={
+                  quickAction?.targetView === "purchase-invoices" &&
+                  quickAction.action === "invoice"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("sales-invoices") && (
+            <section hidden={currentView !== "sales-invoices"}>
+              <InvoicesClient
+                key="SALE"
+                currencyUnit={currencyUnit}
+                initialType="SALE"
+                quickAction={
+                  quickAction?.targetView === "sales-invoices" &&
+                  quickAction.action === "invoice"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("contacts") && (
+            <section hidden={currentView !== "contacts"}>
+              <ContactsClient
+                currencyUnit={currencyUnit}
+                quickAction={
+                  quickAction?.targetView === "contacts" &&
+                  quickAction.action === "contact"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("payments") && (
+            <section hidden={currentView !== "payments"}>
+              <PaymentsClient
+                currencyUnit={currencyUnit}
+                quickAction={
+                  quickAction?.targetView === "payments" &&
+                  quickAction.action === "payment"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("expenses") && (
+            <section hidden={currentView !== "expenses"}>
+              <ExpensesClient
+                currencyUnit={currencyUnit}
+                quickAction={
+                  quickAction?.targetView === "expenses" &&
+                  quickAction.action === "expense"
+                    ? quickAction
+                    : null
+                }
+              />
+            </section>
+          )}
+
+          {visitedViews.includes("reports") && (
+            <section hidden={currentView !== "reports"}>
+              <ReportsClient currencyUnit={currencyUnit} />
+            </section>
+          )}
+
+          {currentView === "dashboard" && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -674,83 +901,10 @@ export default function DashboardClient({
                         در حال دریافت اطلاعات نمودار...
                       </div>
                     ) : dashboard ? (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={dashboard.salesTrend}>
-                          <defs>
-                            <linearGradient
-                              id="salesGradient"
-                              x1="0"
-                              y1="0"
-                              x2="0"
-                              y2="1"
-                            >
-                              <stop
-                                offset="0%"
-                                stopColor="#22c55e"
-                                stopOpacity={0.25}
-                              />
-                              <stop
-                                offset="95%"
-                                stopColor="#22c55e"
-                                stopOpacity={0}
-                              />
-                            </linearGradient>
-                          </defs>
-
-                          <CartesianGrid
-                            stroke="#26323d"
-                            strokeDasharray="4 4"
-                            vertical={false}
-                          />
-
-                          <XAxis
-                            dataKey="month"
-                            stroke="#64748b"
-                            tick={{ fontSize: 10 }}
-                            axisLine={false}
-                            tickLine={false}
-                          />
-
-                          <YAxis
-                            stroke="#64748b"
-                            tick={{ fontSize: 10 }}
-                            axisLine={false}
-                            tickLine={false}
-                            tickFormatter={(value) =>
-                              new Intl.NumberFormat("fa-IR", {
-                                notation: "compact",
-                                maximumFractionDigits: 1,
-                              }).format(
-                                currencyUnit === "TOMAN"
-                                  ? Number(value) / 10
-                                  : Number(value)
-                              )
-                            }
-                          />
-
-                          <Tooltip
-                            contentStyle={{
-                              background: "#18222d",
-                              border: "1px solid #344454",
-                              borderRadius: 12,
-                              color: "#fff",
-                              fontSize: 12,
-                            }}
-                            formatter={(value) => [
-                              `${formatAmount(Number(value ?? 0), currencyUnit)} ${currencyLabel}`,
-                              "فروش",
-                            ]}
-                          />
-
-                          <Area
-                            type="monotone"
-                            dataKey="sales"
-                            stroke="#22c55e"
-                            strokeWidth={2.5}
-                            fill="url(#salesGradient)"
-                          />
-                        </AreaChart>
-                      </ResponsiveContainer>
+                      <DashboardSalesChart
+                        data={dashboard.salesTrend}
+                        currencyUnit={currencyUnit}
+                      />
                     ) : (
                       <div className="flex h-full items-center justify-center text-sm text-slate-500">
                         اطلاعات نمودار در دسترس نیست.
@@ -767,25 +921,17 @@ export default function DashboardClient({
 
                   <div className="mt-6 space-y-3">
                     {[
-                      { title: "ثبت فاکتور فروش", icon: ReceiptText },
-                      { title: "ثبت فاکتور خرید", icon: ShoppingCart },
-                      { title: "افزودن کالای جدید", icon: Package },
-                      { title: "ثبت هزینه جدید", icon: Wallet },
+                      { title: "ثبت فاکتور فروش", icon: ReceiptText, view: "sales-invoices" as const, action: "invoice" as const },
+                      { title: "ثبت فاکتور خرید", icon: ShoppingCart, view: "purchase-invoices" as const, action: "invoice" as const },
+                      { title: "افزودن کالای جدید", icon: Package, view: "inventory" as const, action: "product" as const },
+                      { title: "افزودن مشتری", icon: UserRound, view: "contacts" as const, action: "contact" as const },
+                      { title: "ثبت پرداخت", icon: Wallet, view: "payments" as const, action: "payment" as const },
+                      { title: "ثبت هزینه جدید", icon: Wallet, view: "expenses" as const, action: "expense" as const },
                     ].map((item) => (
                       <button
                         key={item.title}
                         type="button"
-                        onClick={() => {
-                          if (item.title === "ثبت فاکتور فروش") {
-                            navigateTo("sales-invoices");
-                          } else if (item.title === "ثبت فاکتور خرید") {
-                            navigateTo("purchase-invoices");
-                          } else if (item.title === "افزودن کالای جدید") {
-                            navigateTo("inventory");
-                          } else if (item.title === "ثبت هزینه جدید") {
-                            navigateTo("expenses");
-                          }
-                        }}
+                        onClick={() => navigateTo(item.view, item.action)}
                         className="flex w-full items-center gap-3 rounded-xl border border-[#26323d] bg-[#151f29] p-4 text-right text-sm transition hover:border-green-500/40 hover:bg-[#1b2932]"
                       >
                         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-green-500/10 text-green-400">
@@ -919,10 +1065,6 @@ export default function DashboardClient({
                 </div>
               </div>
 
-              <div className="flex items-center justify-center gap-2 pb-3 text-xs text-slate-600">
-                <FileText size={14} />
-                Hirad Accounting | سیستم مدیریت مالی و حسابداری
-              </div>
             </>
           )}
         </div>

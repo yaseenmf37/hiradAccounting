@@ -3,7 +3,11 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { toRial } from "@/lib/currency";
+import { currencyInputToRial } from "@/lib/currency";
+import {
+  getCursorPage,
+  parseCursorPageParams,
+} from "@/lib/cursor-pagination";
 
 const productSchema = z.object({
   name: z.string().trim().min(2).max(150),
@@ -11,8 +15,8 @@ const productSchema = z.object({
   barcode: z.string().trim().max(100).optional().nullable(),
   categoryId: z.string().optional().nullable(),
   unit: z.string().trim().min(1).max(30).default("عدد"),
-  purchasePrice: z.string().regex(/^\d+$/).default("0"),
-  salePrice: z.string().regex(/^\d+$/).default("0"),
+  purchasePrice: z.string().regex(/^\d{1,18}(\.\d)?$/).default("0"),
+  salePrice: z.string().regex(/^\d{1,18}(\.\d)?$/).default("0"),
   initialStock: z.string().regex(/^\d+(\.\d{1,3})?$/).default("0"),
   minStock: z.string().regex(/^\d+(\.\d{1,3})?$/).default("0"),
 });
@@ -67,33 +71,131 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search")?.trim();
     const categoryId = searchParams.get("categoryId");
     const includeArchived = searchParams.get("includeArchived") === "true";
-
-    const products = await prisma.product.findMany({
-      where: {
-        businessId: user.business.id,
-        ...(includeArchived ? {} : { isActive: true }),
-        ...(categoryId ? { categoryId } : {}),
-        ...(search
-          ? {
-              OR: [
-                { name: { contains: search, mode: "insensitive" } },
-                { sku: { contains: search, mode: "insensitive" } },
-                { barcode: { contains: search, mode: "insensitive" } },
-              ],
-            }
-          : {}),
-      },
-      include: {
-        category: {
-          select: { id: true, name: true },
+    const rawIds = searchParams.get("ids");
+    const ids = rawIds ? rawIds.split(",").filter(Boolean).slice(0, 100) : [];
+    if (ids.length > 0) {
+      const products = await prisma.product.findMany({
+        where: {
+          businessId: user.business.id,
+          id: { in: ids },
+          ...(includeArchived ? {} : { isActive: true }),
+          ...(categoryId ? { categoryId } : {}),
+          ...(search
+            ? {
+                OR: [
+                  { name: { contains: search, mode: "insensitive" as const } },
+                  { sku: { contains: search, mode: "insensitive" as const } },
+                  { barcode: { contains: search, mode: "insensitive" as const } },
+                ],
+              }
+            : {}),
         },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+        include: {
+          category: { select: { id: true, name: true } },
+        },
+      });
+
+      return NextResponse.json({
+        products: products.map(serializeProduct),
+        total: products.length,
+        nextCursor: null,
+      });
+    }
+
+    const pagination = parseCursorPageParams(searchParams);
+
+    if (!pagination) {
+      return NextResponse.json(
+        { message: "محدوده تعداد نتایج معتبر نیست." },
+        { status: 400 }
+      );
+    }
+
+    const where = {
+      businessId: user.business.id,
+      ...(includeArchived ? {} : { isActive: true }),
+      ...(categoryId ? { categoryId } : {}),
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: "insensitive" as const } },
+              { sku: { contains: search, mode: "insensitive" as const } },
+              { barcode: { contains: search, mode: "insensitive" as const } },
+            ],
+          }
+        : {}),
+    };
+
+    const [rows, total, stats] = await prisma.$transaction([
+      prisma.product.findMany({
+        where,
+        select: {
+          id: true,
+          name: true,
+          sku: true,
+          barcode: true,
+          unit: true,
+          purchasePrice: true,
+          salePrice: true,
+          averageCost: true,
+          inventoryValue: true,
+          stock: true,
+          minStock: true,
+          isActive: true,
+          categoryId: true,
+          createdAt: true,
+          updatedAt: true,
+          category: {
+            select: { id: true, name: true },
+          },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: pagination.limit + 1,
+        ...(pagination.cursor
+          ? { cursor: { id: pagination.cursor }, skip: 1 }
+          : {}),
+      }),
+      prisma.product.count({
+        where: {
+          businessId: user.business.id,
+          ...(includeArchived ? {} : { isActive: true }),
+          ...(categoryId ? { categoryId } : {}),
+          ...(search
+            ? {
+                OR: [
+                  { name: { contains: search, mode: "insensitive" as const } },
+                  { sku: { contains: search, mode: "insensitive" as const } },
+                  { barcode: { contains: search, mode: "insensitive" as const } },
+                ],
+              }
+            : {}),
+        },
+      }),
+      prisma.$queryRaw<{
+        activeCount: bigint;
+        archivedCount: bigint;
+        lowStockCount: bigint;
+        inventoryValue: bigint;
+      }[]>`SELECT
+            COUNT(*) FILTER (WHERE "isActive") AS "activeCount",
+            COUNT(*) FILTER (WHERE NOT "isActive") AS "archivedCount",
+            COUNT(*) FILTER (WHERE "isActive" AND "stock" <= "minStock") AS "lowStockCount",
+            COALESCE(SUM("inventoryValue") FILTER (WHERE "isActive"), 0) AS "inventoryValue"
+          FROM "Product" WHERE "businessId" = ${user.business.id}`,
+    ]);
+
+    const page = getCursorPage(rows, pagination.limit);
 
     return NextResponse.json({
-      products: products.map(serializeProduct),
-      total: products.length,
+      products: page.items.map(serializeProduct),
+      total,
+      nextCursor: page.nextCursor,
+      stats: {
+        total: Number(stats[0]?.activeCount ?? 0n),
+        archived: Number(stats[0]?.archivedCount ?? 0n),
+        lowStock: Number(stats[0]?.lowStockCount ?? 0n),
+        inventoryValue: (stats[0]?.inventoryValue ?? 0n).toString(),
+      },
     });
   } catch (error) {
     console.error("Get products error:", error);
@@ -151,15 +253,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const purchasePrice = toRial(
-      BigInt(data.purchasePrice),
-      business.currencyUnit
-    );
+    const purchasePrice = currencyInputToRial(data.purchasePrice, business.currencyUnit);
 
-    const salePrice = toRial(
-      BigInt(data.salePrice),
-      business.currencyUnit
-    );
+    const salePrice = currencyInputToRial(data.salePrice, business.currencyUnit);
 
     const initialStock = new Prisma.Decimal(data.initialStock);
     const minStock = new Prisma.Decimal(data.minStock);
@@ -236,6 +332,12 @@ export async function POST(request: NextRequest) {
     if (error instanceof Error && error.message === "CATEGORY_NOT_FOUND") {
       return NextResponse.json(
         { message: "دسته‌بندی انتخاب‌شده معتبر نیست." },
+        { status: 400 }
+      );
+    }
+    if (error instanceof Error && error.message === "INVALID_CURRENCY_AMOUNT") {
+      return NextResponse.json(
+        { message: "مبلغ قیمت با واحد پول کسب‌وکار سازگار نیست." },
         { status: 400 }
       );
     }

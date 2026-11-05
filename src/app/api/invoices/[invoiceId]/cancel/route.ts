@@ -43,6 +43,7 @@ export async function POST(
           },
           include: {
             items: true,
+            purchaseReturns: { select: { id: true } },
             payments: {
               where: {
                 status: PaymentStatus.CONFIRMED,
@@ -67,6 +68,19 @@ export async function POST(
         }
         if (!invoice.issuedAt) {
           throw new Error("INVOICE_ISSUE_DATE_MISSING");
+        }
+        if (invoice.type === "PURCHASE" && invoice.purchaseReturns.length > 0) {
+          throw new Error("PURCHASE_HAS_RETURNS");
+        }
+        if (invoice.type === "SALE") {
+          const salesReturns = await tx.$queryRaw<{ count: bigint }[]>`
+            SELECT COUNT(*) AS count
+            FROM "SalesReturn"
+            WHERE "invoiceId" = ${invoice.id} AND "businessId" = ${businessId}
+          `;
+          if ((salesReturns[0]?.count ?? 0n) > 0n) {
+            throw new Error("SALE_HAS_RETURNS");
+          }
         }
 
         const groupedItems = new Map<
@@ -94,12 +108,28 @@ export async function POST(
         // لغو خرید فقط زمانی مجاز است که هیچ گردش بعدی روی کالاها نباشد.
         if (invoice.type === "PURCHASE") {
           const productIds = [...groupedItems.keys()];
+          const firstPurchaseMovement = await tx.inventoryMovement.findFirst({
+            where: {
+              businessId,
+              invoiceId: invoice.id,
+              type: "PURCHASE",
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: { createdAt: true },
+          });
+          if (!firstPurchaseMovement) {
+            throw new Error("ORIGINAL_MOVEMENT_NOT_FOUND");
+          }
 
           const laterMovement = await tx.inventoryMovement.findFirst({
             where: {
               businessId,
               productId: { in: productIds },
-              createdAt: { gt: invoice.issuedAt },
+              createdAt: { gte: firstPurchaseMovement.createdAt },
+              OR: [
+                { invoiceId: null },
+                { invoiceId: { not: invoice.id } },
+              ],
             },
             select: {
               id: true,
@@ -304,6 +334,14 @@ export async function POST(
         PURCHASE_HAS_LATER_MOVEMENTS: {
           message:
             "پس از این خرید برای یکی از کالاها گردش دیگری ثبت شده است؛ لغو خرید برای حفظ دقت بهای تمام‌شده امکان‌پذیر نیست.",
+          status: 409,
+        },
+        PURCHASE_HAS_RETURNS: {
+          message: "فاکتور خرید دارای مرجوعی است؛ برای حفظ سوابق، ابتدا مرجوعی باید در مسیر اصلاحی جداگانه تعیین تکلیف شود.",
+          status: 409,
+        },
+        SALE_HAS_RETURNS: {
+          message: "فاکتور فروش دارای مرجوعی است؛ برای حفظ سوابق، لغو مستقیم آن مجاز نیست.",
           status: 409,
         },
         INVOICE_ISSUE_DATE_MISSING: {

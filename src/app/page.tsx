@@ -3,8 +3,36 @@ import { getCurrentUser } from "@/lib/auth";
 import DashboardClient from "./dashboard-client";
 
 export const instant = false;
-export default async function Home() {
+type DashboardView =
+  | "dashboard"
+  | "inventory"
+  | "contacts"
+  | "purchase-invoices"
+  | "sales-invoices"
+  | "payments"
+  | "expenses"
+  | "reports";
+const views = new Set<DashboardView>([
+  "dashboard",
+  "inventory",
+  "contacts",
+  "purchase-invoices",
+  "sales-invoices",
+  "payments",
+  "expenses",
+  "reports",
+]);
+
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ view?: string }>;
+}) {
   const user = await getCurrentUser();
+  const { view } = await searchParams;
+  const initialView: DashboardView = views.has(view as DashboardView)
+    ? (view as DashboardView)
+    : "dashboard";
 
   if (!user) {
     redirect("/login");
@@ -29,6 +57,7 @@ export default async function Home() {
             }
           : null,
       }}
+      initialView={initialView}
     />
   );
 }
