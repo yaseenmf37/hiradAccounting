@@ -43,7 +43,7 @@ button {
 
 @page {
   size: A4;
-  margin: 14mm;
+  margin: 9mm;
 }
 
 @media print {
@@ -52,6 +52,10 @@ button {
     background: white !important;
     color: #111 !important;
     direction: rtl;
+  }
+
+  body.printing-invoice > *:not(.print-invoice-root) {
+    display: none !important;
   }
 
   body * {
@@ -74,6 +78,13 @@ button {
     font: 12px Tahoma, Arial, sans-serif;
   }
 
+  body.printing-invoice > .print-invoice-root {
+    position: static !important;
+    inset: auto !important;
+    width: 100% !important;
+    min-height: 0;
+  }
+
   .print-only h1 {
     margin: 0 0 12px;
     font-size: 20px;
@@ -82,8 +93,8 @@ button {
   .print-invoice-header {
     display: flex;
     justify-content: space-between;
-    gap: 24px;
-    padding-bottom: 16px;
+    gap: 12px;
+    padding-bottom: 6px;
     border-bottom: 2px solid #222;
   }
 
@@ -91,20 +102,30 @@ button {
   .print-invoice-meta p,
   .print-invoice-totals p,
   .print-invoice-payments p {
-    margin: 6px 0;
+    margin: 2px 0;
+  }
+
+  .print-invoice-table thead {
+    display: table-header-group;
+  }
+
+  .print-invoice-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 
   .print-invoice-table {
     width: 100%;
-    margin-top: 20px;
+    margin-top: 8px;
     border-collapse: collapse;
   }
 
   .print-invoice-table th,
   .print-invoice-table td {
-    padding: 8px;
+    padding: 4px 6px;
     border: 1px solid #777;
     text-align: right;
+    line-height: 1.35;
   }
 
   .print-invoice-table th {
@@ -114,24 +135,31 @@ button {
 
   .print-invoice-totals {
     width: 50%;
-    margin: 18px 0 0 auto;
+    margin: 8px 0 0 auto;
   }
 
   .print-invoice-totals strong {
     display: block;
-    margin-top: 10px;
-    padding-top: 10px;
+    margin-top: 4px;
+    padding-top: 4px;
     border-top: 1px solid #555;
     font-size: 14px;
   }
 
   .print-invoice-payments {
-    margin-top: 18px;
+    margin-top: 6px;
+  }
+
+  .print-invoice-description {
+    margin: 4px 0 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .print-invoice-signatures {
     display: flex;
     justify-content: space-between;
-    margin-top: 64px;
+    margin-top: 14px;
   }
 }

@@ -14,6 +14,7 @@ import {
   Wallet,
   Receipt,
   CalendarDays,
+  CheckCircle2,
 } from "lucide-react";
 
 import DatePicker from "react-multi-date-picker";
@@ -66,6 +67,7 @@ type Payment = {
   checkNumber?: string | null;
   checkIssuedAt?: string | null;
   checkDueAt?: string | null;
+  checkClearedAt?: string | null;
   payableTo?: string | null;
   destinationDetails?: string | null;
   description: string | null;
@@ -92,6 +94,7 @@ type PaymentForm = {
   checkNumber: string;
   checkIssuedAt: string;
   checkDueAt: string;
+  checkClearedAt: string;
   payableTo: string;
   destinationDetails: string;
   description: string;
@@ -108,6 +111,7 @@ const emptyForm: PaymentForm = {
   checkNumber: "",
   checkIssuedAt: "",
   checkDueAt: "",
+  checkClearedAt: "",
   payableTo: "",
   destinationDetails: "",
   description: "",
@@ -206,6 +210,8 @@ export default function PaymentsClient({
   const [form, setForm] = useState<PaymentForm>(emptyForm);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [checkClearingId, setCheckClearingId] = useState<string | null>(null);
+  const [checkClearDate, setCheckClearDate] = useState("");
   const [totalCount, setTotalCount] = useState(0);
   const [serverStats, setServerStats] = useState({
     receipts: "0",
@@ -405,6 +411,7 @@ export default function PaymentsClient({
           checkNumber: form.method === "CHECK" ? form.checkNumber.trim() || null : null,
           checkIssuedAt: form.method === "CHECK" ? form.checkIssuedAt || null : null,
           checkDueAt: form.method === "CHECK" ? form.checkDueAt || null : null,
+          checkClearedAt: form.method === "CHECK" ? form.checkClearedAt || null : null,
           payableTo: form.method === "CHECK" ? form.payableTo.trim() || null : null,
           destinationDetails:
             form.method === "CARD_TO_CARD" || form.method === "POS"
@@ -464,6 +471,33 @@ export default function PaymentsClient({
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "لغو تراکنش ناموفق بود.");
+    }
+  }
+
+  async function markCheckCleared(payment: Payment) {
+    if (!checkClearDate) return;
+
+    setError("");
+    setSuccess("");
+
+    try {
+      const response = await fetch(`/api/payments/${payment.id}/clear-check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checkClearedAt: checkClearDate }),
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "ثبت پاس‌شدن چک ناموفق بود.");
+      }
+
+      setCheckClearingId(null);
+      setCheckClearDate("");
+      setSuccess("تاریخ پاس‌شدن چک ثبت شد.");
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "ثبت پاس‌شدن چک ناموفق بود.");
     }
   }
 
@@ -673,6 +707,13 @@ export default function PaymentsClient({
 
                     <td className="px-5 py-4 text-slate-300">
                       {methodLabels[payment.method]}
+                      {payment.method === "CHECK" && (
+                        <span className="mt-1 block text-xs text-slate-500">
+                          {payment.checkClearedAt
+                            ? `پاس‌شده: ${new Date(payment.checkClearedAt).toLocaleDateString("fa-IR-u-ca-persian", { timeZone: "Asia/Tehran" })}`
+                            : "پاس‌نشده / نامشخص"}
+                        </span>
+                      )}
                     </td>
 
                     <td className="px-5 py-4 text-slate-400" dir="ltr">
@@ -711,14 +752,51 @@ export default function PaymentsClient({
 
                     <td className="px-5 py-4">
                       {payment.status === "CONFIRMED" ? (
-                        <button
-                          type="button"
-                          title="لغو تراکنش"
-                          onClick={() => void cancelPayment(payment)}
-                          className="rounded-lg border border-red-500/30 p-2 text-red-400 hover:bg-red-500/10"
-                        >
-                          <Ban size={16} />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          {payment.method === "CHECK" && !payment.checkClearedAt && (
+                            checkClearingId === payment.id ? (
+                              <div className="flex items-center gap-1">
+                                <input
+                                  aria-label="تاریخ واقعی پاس‌شدن چک"
+                                  type="date"
+                                  value={checkClearDate}
+                                  min={payment.checkIssuedAt?.slice(0, 10)}
+                                  onChange={(event) => setCheckClearDate(event.target.value)}
+                                  className="w-32 rounded-lg border border-[#293642] bg-[#111b24] p-2 text-xs text-white"
+                                />
+                                <button
+                                  type="button"
+                                  title="ثبت تاریخ پاس‌شدن"
+                                  disabled={!checkClearDate}
+                                  onClick={() => void markCheckCleared(payment)}
+                                  className="rounded-lg border border-green-500/30 p-2 text-green-400 disabled:opacity-40"
+                                >
+                                  <CheckCircle2 size={16} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                title="ثبت پاس‌شدن چک"
+                                onClick={() => {
+                                  setCheckClearingId(payment.id);
+                                  setCheckClearDate("");
+                                }}
+                                className="rounded-lg border border-green-500/30 px-2 py-1 text-xs text-green-400 hover:bg-green-500/10"
+                              >
+                                چک پاس شد
+                              </button>
+                            )
+                          )}
+                          <button
+                            type="button"
+                            title="لغو تراکنش"
+                            onClick={() => void cancelPayment(payment)}
+                            className="rounded-lg border border-red-500/30 p-2 text-red-400 hover:bg-red-500/10"
+                          >
+                            <Ban size={16} />
+                          </button>
+                        </div>
                       ) : (
                         <span className="text-xs text-slate-600">
                           {payment.cancelReason || "—"}
@@ -887,16 +965,25 @@ export default function PaymentsClient({
             {form.method === "CHECK" && (
               <>
                 <Field label="شماره چک">
-                  <input required maxLength={100} value={form.checkNumber} onChange={(event) => updateForm("checkNumber", event.target.value)} className={inputClass} />
+                  <input maxLength={100} value={form.checkNumber} onChange={(event) => updateForm("checkNumber", event.target.value)} className={inputClass} />
                 </Field>
                 <Field label="تاریخ صدور چک">
-                  <input required type="date" value={form.checkIssuedAt} onChange={(event) => updateForm("checkIssuedAt", event.target.value)} className={inputClass} />
+                  <input type="date" value={form.checkIssuedAt} onChange={(event) => updateForm("checkIssuedAt", event.target.value)} className={inputClass} />
                 </Field>
                 <Field label="تاریخ سررسید چک">
-                  <input required type="date" min={form.checkIssuedAt || undefined} value={form.checkDueAt} onChange={(event) => updateForm("checkDueAt", event.target.value)} className={inputClass} />
+                  <input type="date" min={form.checkIssuedAt || undefined} value={form.checkDueAt} onChange={(event) => updateForm("checkDueAt", event.target.value)} className={inputClass} />
                 </Field>
                 <Field label="در وجه">
-                  <input required maxLength={150} value={form.payableTo} onChange={(event) => updateForm("payableTo", event.target.value)} className={inputClass} />
+                  <input maxLength={150} value={form.payableTo} onChange={(event) => updateForm("payableTo", event.target.value)} className={inputClass} />
+                </Field>
+                <Field label="تاریخ واقعی پاس‌شدن (در صورت پاس‌شدن)">
+                  <input
+                    type="date"
+                    min={form.checkIssuedAt || undefined}
+                    value={form.checkClearedAt}
+                    onChange={(event) => updateForm("checkClearedAt", event.target.value)}
+                    className={inputClass}
+                  />
                 </Field>
               </>
             )}

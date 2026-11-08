@@ -184,22 +184,34 @@ export async function GET() {
       }),
     ]);
 
-    const getInvoiceTotal = (
-      rows: typeof currentInvoices,
-      type: "SALE" | "PURCHASE"
-    ) =>
-      rows.find((row) => row.type === type)?._sum.total ?? 0n;
+   const toBigInt = (
+  value: bigint | number | string | null | undefined
+): bigint => {
+  if (value == null) return 0n;
+  return typeof value === "bigint" ? value : BigInt(value);
+};
 
-    const currentSales = getInvoiceTotal(currentInvoices, "SALE") -
-      (currentSalesReturns[0]?.amount ?? 0n);
-    const previousSales = getInvoiceTotal(previousInvoices, "SALE") -
-      (previousSalesReturns[0]?.amount ?? 0n);
-    const currentPurchases =
-      getInvoiceTotal(currentInvoices, "PURCHASE") -
-      (currentPurchaseReturns._sum.total ?? 0n);
-    const previousPurchases =
-      getInvoiceTotal(previousInvoices, "PURCHASE") -
-      (previousPurchaseReturns._sum.total ?? 0n);
+const getInvoiceTotal = (
+  rows: typeof currentInvoices,
+  type: "SALE" | "PURCHASE"
+): bigint =>
+  toBigInt(rows.find((row) => row.type === type)?._sum.total);
+
+const currentSales =
+  getInvoiceTotal(currentInvoices, "SALE") -
+  toBigInt(currentSalesReturns[0]?.amount);
+
+const previousSales =
+  getInvoiceTotal(previousInvoices, "SALE") -
+  toBigInt(previousSalesReturns[0]?.amount);
+
+const currentPurchases =
+  getInvoiceTotal(currentInvoices, "PURCHASE") -
+  toBigInt(currentPurchaseReturns._sum.total);
+
+const previousPurchases =
+  getInvoiceTotal(previousInvoices, "PURCHASE") -
+  toBigInt(previousPurchaseReturns._sum.total);
 
     const currentExpenseTotal = currentExpenses._sum.amount ?? 0n;
     const previousExpenseTotal = previousExpenses._sum.amount ?? 0n;

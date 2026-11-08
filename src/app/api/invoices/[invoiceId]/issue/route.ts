@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { MAX_CURRENCY_RIAL } from "@/lib/currency";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 import { z } from "zod";
 
 type RouteContext = {
@@ -113,6 +114,7 @@ export async function POST(
             status: true,
             invoiceDate: true,
             total: true,
+            contactId: true,
             subtotal: true,
             extraCosts: true,
             discount: true,
@@ -120,7 +122,7 @@ export async function POST(
             items: true,
             payments: {
               where: { status: { in: ["PENDING", "CONFIRMED"] } },
-              select: { id: true, method: true, amount: true, status: true },
+              select: { id: true, method: true, amount: true, status: true, checkClearedAt: true },
             },
           },
         });
@@ -135,6 +137,16 @@ export async function POST(
         const paymentTotal = invoice.payments.reduce((sum, payment) => sum + payment.amount, 0n);
         if (invoice.paymentPlanRecorded && paymentTotal !== invoice.total) {
           throw new Error("PAYMENTS_NOT_EQUAL");
+        }
+        const immediatelyPaidTotal = invoice.payments.reduce(
+          (sum, payment) => payment.method === "LEDGER" ||
+            (payment.method === "CHECK" && payment.checkClearedAt === null)
+            ? sum
+            : sum + payment.amount,
+          0n,
+        );
+        if (invoice.type === "SALE" && !invoice.contactId && immediatelyPaidTotal < invoice.total) {
+          throw new Error("CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT");
         }
 
         const items = invoice.items as InvoiceItemData[];
@@ -232,20 +244,15 @@ export async function POST(
               0n
             );
 
-            newStock = product.stock.add(group.quantity);
-            if (product.stock.lessThan(0)) {
-              const remainingQuantity = newStock.greaterThan(0) ? newStock : new Prisma.Decimal(0);
-              const groupUnits = BigInt(group.quantity.mul(1_000_000).toFixed(0));
-              const remainingUnits = BigInt(remainingQuantity.mul(1_000_000).toFixed(0));
-              newInventoryValue = groupUnits > 0n
-                ? (totalCost * remainingUnits) / groupUnits
-                : 0n;
-            } else {
-              newInventoryValue = product.inventoryValue + totalCost;
-            }
-            newAverageCost = newStock.greaterThan(0)
-              ? new Prisma.Decimal(newInventoryValue.toString()).div(newStock)
-              : new Prisma.Decimal(0);
+            const inventory = addInventoryStock(
+              product.stock,
+              product.inventoryValue,
+              group.quantity,
+              totalCost,
+            );
+            newStock = inventory.stock;
+            newInventoryValue = inventory.inventoryValue;
+            newAverageCost = inventory.averageCost;
           } else {
             if (product.stock.lessThan(group.quantity) && !shortageMode) {
               throw new Error("SHORTAGE_MODE_REQUIRED");
@@ -254,23 +261,17 @@ export async function POST(
             const available = product.stock.greaterThan(0)
               ? Prisma.Decimal.min(product.stock, group.quantity)
               : new Prisma.Decimal(0);
-            const quantityToDeduct = shortageMode === "BACKORDER" && product.stock.lessThan(group.quantity)
-              ? available
-              : group.quantity;
             const costQuantity = available;
-            newStock = product.stock.sub(quantityToDeduct);
+            newStock = product.stock.sub(group.quantity);
             const calculatedCost = costQuantity.equals(product.stock) && product.stock.greaterThan(0)
               ? product.inventoryValue
               : BigInt(product.averageCost.mul(costQuantity).toFixed(0, Prisma.Decimal.ROUND_HALF_UP));
             totalCost = calculatedCost > product.inventoryValue
               ? product.inventoryValue
               : calculatedCost;
-            if (product.stock.greaterThan(0) && quantityToDeduct.greaterThanOrEqualTo(product.stock)) {
-              newInventoryValue = 0n;
-              newStock = new Prisma.Decimal(0);
-            } else {
-              newInventoryValue = product.inventoryValue - totalCost;
-            }
+            newInventoryValue = product.stock.greaterThan(0)
+              ? product.inventoryValue - totalCost
+              : 0n;
             newAverageCost = newStock.lessThanOrEqualTo(0)
               ? new Prisma.Decimal(0)
               : new Prisma.Decimal(newInventoryValue.toString()).div(newStock);
@@ -301,7 +302,7 @@ export async function POST(
               });
             }
 
-            if (shortageMode === "BACKORDER" && group.quantity.greaterThan(available)) {
+            if (group.quantity.greaterThan(available)) {
               let remainingAvailable = available;
               for (const item of group.items) {
                 const itemAvailable = remainingAvailable.greaterThan(0)
@@ -319,6 +320,7 @@ export async function POST(
                       requested: item.quantity,
                       fulfilled: itemAvailable,
                       outstanding: itemOutstanding,
+                      inventoryDeducted: true,
                     },
                   });
                 }
@@ -352,11 +354,9 @@ export async function POST(
           }
 
           // ثبت گردش انبار همراه با بهای تمام‌شده
-          const movementQuantity = invoice.type === "SALE" && shortageMode === "BACKORDER" && product.stock.lessThan(group.quantity)
-            ? (product.stock.greaterThan(0) ? Prisma.Decimal.min(product.stock, group.quantity) : new Prisma.Decimal(0))
-            : group.quantity;
+          const movementQuantity = group.quantity;
           if (movementQuantity.greaterThan(0)) {
-            await tx.inventoryMovement.create({
+            const movement = await tx.inventoryMovement.create({
               data: {
                 businessId,
                 productId,
@@ -368,6 +368,9 @@ export async function POST(
                 description: `صدور فاکتور ${invoice.invoiceNumber}`,
               },
             });
+            if (invoice.type === "PURCHASE") {
+              await reconcileNegativeStockBackorders(tx, movement);
+            }
           }
         }
 
@@ -469,11 +472,15 @@ export async function POST(
           status: 409,
         },
         SHORTAGE_MODE_REQUIRED: {
-          message: "برای کالای دارای کسری، روش ادامه (موجودی منفی یا ثبت کسری سفارش) را مشخص کنید.",
+          message: "برای صدور با موجودی کمتر از مقدار فروش، تأیید ثبت موجودی منفی لازم است.",
           status: 409,
         },
         PAYMENTS_NOT_EQUAL: {
           message: "مجموع روش‌های پرداخت باید دقیقاً با مبلغ فاکتور برابر باشد.",
+          status: 400,
+        },
+        CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT: {
+          message: "برای ثبت بدهی یا چک تسویه‌نشده، مشتری دارای حساب را انتخاب کنید.",
           status: 400,
         },
         INVOICE_ALREADY_ISSUED: {

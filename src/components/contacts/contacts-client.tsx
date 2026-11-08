@@ -60,6 +60,76 @@ type ContactForm = {
   description: string;
 };
 
+type LedgerInvoice = {
+  id: string;
+  invoiceNumber: string;
+  type: "SALE" | "PURCHASE";
+  invoiceDate: string;
+  total: string;
+  paidAmount: string;
+  balanceDue: string;
+  paymentMethods: { method: string; amount: string; paidAmount: string }[];
+};
+
+type LedgerInvoiceDetail = {
+  id: string;
+  invoiceNumber: string;
+  type: "SALE" | "PURCHASE";
+  status: string;
+  invoiceDate: string;
+  subtotal: string;
+  extraCosts: string;
+  discount: string;
+  discountPercent?: string | null;
+  total: string;
+  description: string | null;
+  paidAmount: string;
+  balanceDue: string;
+  items: {
+    id: string;
+    quantity: string;
+    unitPrice: string;
+    total: string;
+    product: { name: string; unit: string };
+  }[];
+  payments: {
+    method: string;
+    amount: string;
+    description: string | null;
+    status?: string;
+    checkNumber?: string | null;
+    checkIssuedAt?: string | null;
+    checkDueAt?: string | null;
+    checkClearedAt?: string | null;
+    payableTo?: string | null;
+    destinationDetails?: string | null;
+  }[];
+};
+
+type LedgerData = {
+  summary: {
+    openingBalance: string;
+    totalDebit: string;
+    totalCredit: string;
+    balance: string;
+  };
+  entries: {
+    id: string;
+    date: string;
+    title: string;
+    reference: string | null;
+    description: string | null;
+    direction: "DEBIT" | "CREDIT" | "INFO";
+    amount: string;
+    balance: string;
+    paymentMethod?: string;
+    trackingNumber?: string | null;
+    paymentDetails?: Record<string, string | null>;
+  }[];
+  total: number;
+  nextCursor: string | null;
+};
+
 const paymentMethodLabels: Record<string, string> = {
   CASH: "نقدی",
   CHECK: "چک",
@@ -184,7 +254,15 @@ function formatLedgerAmount(amount: string) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [ledgerContact, setLedgerContact] = useState<Contact | null>(null);
-  const [ledgerData, setLedgerData] = useState<any>(null);
+  const [ledgerData, setLedgerData] = useState<LedgerData | null>(null);
+  const [ledgerInvoices, setLedgerInvoices] = useState<LedgerInvoice[]>([]);
+  const [invoiceSettlement, setInvoiceSettlement] = useState<"all" | "settled" | "outstanding">("all");
+  const [invoiceNextCursor, setInvoiceNextCursor] = useState<string | null>(null);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [invoiceListError, setInvoiceListError] = useState("");
+  const [expandedInvoiceId, setExpandedInvoiceId] = useState<string | null>(null);
+  const [ledgerInvoiceDetail, setLedgerInvoiceDetail] = useState<LedgerInvoiceDetail | null>(null);
+  const [ledgerInvoiceDetailError, setLedgerInvoiceDetailError] = useState("");
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [ledgerError, setLedgerError] = useState("");
   const [ledgerStartDate, setLedgerStartDate] = useState<DateObject | null>(null);
@@ -390,48 +468,154 @@ function formatLedgerAmount(amount: string) {
   setLedgerData(null);
   setLedgerError("");
   setLedgerLoading(true);
+  setInvoiceLoading(true);
+  setInvoiceListError("");
 
   try {
 const params = new URLSearchParams();
 params.set("limit", "50");
 if (cursor) params.set("cursor", cursor);
 
+const invoiceParams = new URLSearchParams({
+  limit: "50",
+  settlement: invoiceSettlement,
+});
+
 if (startDate) {
-  params.set(
-  "startDate",
-  toEnglishDigits(startDate.convert(gregorian).format("YYYY-MM-DD")),
-);
+  const date = toEnglishDigits(startDate.convert(gregorian).format("YYYY-MM-DD"));
+  params.set("startDate", date);
+  invoiceParams.set("startDate", date);
 }
 
 if (endDate) {
-  params.set(
-  "endDate",
-  toEnglishDigits(endDate.convert(gregorian).format("YYYY-MM-DD")),
-);
+  const date = toEnglishDigits(endDate.convert(gregorian).format("YYYY-MM-DD"));
+  params.set("endDate", date);
+  invoiceParams.set("endDate", date);
 }
 
-const query = params.toString();
-const response = await fetch(
-  `/api/contacts/${contact.id}/ledger${query ? `?${query}` : ""}`,
-  { cache: "no-store" },
-);
+const [response, invoicesResponse] = await Promise.all([
+  fetch(`/api/contacts/${contact.id}/ledger?${params}`, { cache: "no-store" }),
+  fetch(`/api/contacts/${contact.id}/invoices?${invoiceParams}`, { cache: "no-store" }),
+]);
+const [data, invoiceData] = await Promise.all([
+  response.json(),
+  invoicesResponse.json(),
+]);
 
-    const data = await response.json();
+if (!response.ok) {
+  throw new Error(data.error || data.message || "دریافت دفتر حساب ناموفق بود.");
+}
+if (!invoicesResponse.ok) {
+  throw new Error(invoiceData.error || "دریافت فاکتورهای طرف حساب ناموفق بود.");
+}
 
-    if (!response.ok) {
-      throw new Error(data.error || data.message || "دریافت دفتر حساب ناموفق بود.");
-    }
-
-    setLedgerData(data);
-    ledgerPaging.setNextCursor(data.nextCursor ?? null);
+setLedgerData(data);
+setLedgerInvoices(invoiceData.invoices ?? []);
+setInvoiceNextCursor(invoiceData.nextCursor ?? null);
+setExpandedInvoiceId(null);
+ledgerPaging.setNextCursor(data.nextCursor ?? null);
   } catch (err) {
-    setLedgerError(
-      err instanceof Error ? err.message : "دریافت دفتر حساب ناموفق بود."
-    );
+    const message = err instanceof Error ? err.message : "دریافت دفتر حساب ناموفق بود.";
+    setLedgerError(message);
+    setInvoiceListError(message);
   } finally {
     setLedgerLoading(false);
+    setInvoiceLoading(false);
   }
 }
+
+  async function loadMoreLedgerInvoices() {
+    if (!ledgerContact || !invoiceNextCursor || invoiceLoading) return;
+    setInvoiceLoading(true);
+    setInvoiceListError("");
+
+    try {
+      const params = new URLSearchParams({
+        limit: "50",
+        settlement: invoiceSettlement,
+        cursor: invoiceNextCursor,
+      });
+      if (ledgerStartDate) {
+        params.set("startDate", toEnglishDigits(ledgerStartDate.convert(gregorian).format("YYYY-MM-DD")));
+      }
+      if (ledgerEndDate) {
+        params.set("endDate", toEnglishDigits(ledgerEndDate.convert(gregorian).format("YYYY-MM-DD")));
+      }
+      const response = await fetch(
+        `/api/contacts/${ledgerContact.id}/invoices?${params}`,
+        { cache: "no-store" },
+      );
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "دریافت فاکتورهای طرف حساب ناموفق بود.");
+      }
+      setLedgerInvoices((current) => [...current, ...(data.invoices ?? [])]);
+      setInvoiceNextCursor(data.nextCursor ?? null);
+    } catch (err) {
+      setInvoiceListError(err instanceof Error ? err.message : "دریافت فاکتورهای طرف حساب ناموفق بود.");
+    } finally {
+      setInvoiceLoading(false);
+    }
+  }
+
+  async function filterLedgerInvoices(value: "all" | "settled" | "outstanding") {
+    setInvoiceSettlement(value);
+    setInvoiceNextCursor(null);
+    setLedgerInvoices([]);
+    setExpandedInvoiceId(null);
+    if (ledgerContact) {
+      const params = new URLSearchParams({
+        limit: "50",
+        settlement: value,
+      });
+      if (ledgerStartDate) {
+        params.set("startDate", toEnglishDigits(ledgerStartDate.convert(gregorian).format("YYYY-MM-DD")));
+      }
+      if (ledgerEndDate) {
+        params.set("endDate", toEnglishDigits(ledgerEndDate.convert(gregorian).format("YYYY-MM-DD")));
+      }
+      setInvoiceLoading(true);
+      setInvoiceListError("");
+      try {
+        const response = await fetch(
+          `/api/contacts/${ledgerContact.id}/invoices?${params}`,
+          { cache: "no-store" },
+        );
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || "اعمال فیلتر فاکتورها ناموفق بود.");
+        }
+        setLedgerInvoices(data.invoices ?? []);
+        setInvoiceNextCursor(data.nextCursor ?? null);
+      } catch (err) {
+        setInvoiceListError(err instanceof Error ? err.message : "اعمال فیلتر فاکتورها ناموفق بود.");
+      } finally {
+        setInvoiceLoading(false);
+      }
+    }
+  }
+
+  async function openLedgerInvoice(invoice: LedgerInvoice) {
+    setExpandedInvoiceId(invoice.id);
+    setLedgerInvoiceDetail(null);
+    setLedgerInvoiceDetailError("");
+    try {
+      const response = await fetch(`/api/invoices/${invoice.id}`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || data.error || "دریافت جزئیات فاکتور ناموفق بود.");
+      }
+      setLedgerInvoiceDetail({
+        ...data.invoice,
+        paidAmount: invoice.paidAmount,
+        balanceDue: invoice.balanceDue,
+      });
+    } catch (err) {
+      setLedgerInvoiceDetailError(err instanceof Error ? err.message : "دریافت جزئیات فاکتور ناموفق بود.");
+    } finally {
+      setExpandedInvoiceId(null);
+    }
+  }
 
   const activeCount = listStats.active;
   const customerCount = listStats.customers;
@@ -842,7 +1026,13 @@ const response = await fetch(
     onClose={() => {
       setLedgerContact(null);
       setLedgerData(null);
+      setLedgerInvoices([]);
+      setInvoiceNextCursor(null);
+      setExpandedInvoiceId(null);
+      setLedgerInvoiceDetail(null);
+      setLedgerInvoiceDetailError("");
       setLedgerError("");
+      setInvoiceListError("");
     }}
   >
     <div className="space-y-4">
@@ -857,26 +1047,97 @@ const response = await fetch(
         </div>
       ) : ledgerData ? (
         <div className="space-y-4">
+          <div className="overflow-hidden rounded-xl border border-[#293642]">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#293642] p-4">
+              <p className="font-bold text-white">فاکتورهای طرف حساب</p>
+              <select
+                value={invoiceSettlement}
+                onChange={(event) => {
+                  void filterLedgerInvoices(event.target.value as typeof invoiceSettlement);
+                }}
+                className="rounded-lg border border-[#344452] bg-[#111b24] px-3 py-2 text-sm text-white"
+              >
+                <option value="all">همه فاکتورها</option>
+                <option value="outstanding">دارای مانده</option>
+                <option value="settled">تسویه‌شده</option>
+              </select>
+            </div>
+            {invoiceListError ? (
+              <p className="p-4 text-sm text-red-400">{invoiceListError}</p>
+            ) : invoiceLoading ? (
+              <p className="p-4 text-center text-sm text-slate-400">در حال دریافت فاکتورها...</p>
+            ) : ledgerInvoices.length === 0 ? (
+              <p className="p-4 text-center text-sm text-slate-500">فاکتوری با این وضعیت پیدا نشد.</p>
+            ) : (
+              <div className="divide-y divide-[#293642]">
+                {ledgerInvoices.map((invoice) => {
+                  const expanded = expandedInvoiceId === invoice.id;
+                  return (
+                    <div key={invoice.id}>
+                      <button
+                        type="button"
+                        onClick={() => void openLedgerInvoice(invoice)}
+                        className="flex w-full flex-wrap items-center justify-between gap-2 p-4 text-right transition hover:bg-white/5"
+                      >
+                        <span>
+                          <span className="block font-semibold text-white">
+                            {invoice.type === "SALE" ? "فروش" : "خرید"} · {invoice.invoiceNumber}
+                          </span>
+                          <span className="mt-1 block text-xs text-slate-400">
+                            {new Date(invoice.invoiceDate).toLocaleDateString("fa-IR-u-ca-persian")}
+                          </span>
+                        </span>
+                        <span className={`text-sm font-semibold ${BigInt(invoice.balanceDue) > 0n ? "text-amber-400" : "text-green-400"}`}>
+                          {expanded ? "در حال دریافت جزئیات..." : BigInt(invoice.balanceDue) > 0n ? "دارای مانده · مشاهده جزئیات" : "تسویه‌شده · مشاهده جزئیات"}
+                        </span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {invoiceNextCursor && (
+              <button
+                type="button"
+                onClick={() => void loadMoreLedgerInvoices()}
+                disabled={invoiceLoading}
+                className="w-full border-t border-[#293642] px-4 py-3 text-sm text-green-400 hover:bg-white/5 disabled:opacity-50"
+              >
+                {invoiceLoading ? "در حال دریافت..." : "نمایش فاکتورهای بیشتر"}
+              </button>
+            )}
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl border border-[#293642] bg-[#111b24] p-4">
-              <p className="text-xs text-slate-400">مجموع بدهکار</p>
+              <p className="text-xs text-slate-400">بدهکار</p>
               <p className="mt-2 font-bold text-red-400">
                 {formatLedgerAmount(ledgerData.summary.totalDebit)}
               </p>
             </div>
 
             <div className="rounded-xl border border-[#293642] bg-[#111b24] p-4">
-              <p className="text-xs text-slate-400">مجموع بستانکار</p>
+              <p className="text-xs text-slate-400">پرداختی</p>
               <p className="mt-2 font-bold text-green-400">
                 {formatLedgerAmount(ledgerData.summary.totalCredit)}
+              </p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                شامل تراکنش‌های کاهنده مانده، از جمله مرجوعی‌ها
               </p>
             </div>
           </div>
 
           <div className="rounded-xl border border-[#293642] bg-[#111b24] p-4">
-            <p className="text-xs text-slate-400">مانده حساب</p>
+            <p className="text-xs text-slate-400">مانده</p>
             <p className="mt-2 text-xl font-bold text-white">
               {formatLedgerAmount(ledgerData.summary.balance)}
+            </p>
+            <p className="mt-2 text-sm text-slate-300">
+              {BigInt(ledgerData.summary.balance) > 0n
+                ? "طرف حساب به ما بدهکار است."
+                : BigInt(ledgerData.summary.balance) < 0n
+                  ? "ما به طرف حساب بدهکاریم."
+                  : "حساب تسویه است."}
             </p>
           </div>
 
@@ -972,13 +1233,13 @@ const response = await fetch(
             <th className="p-3">تاریخ</th>
             <th className="p-3">شرح</th>
             <th className="p-3">بدهکار</th>
-            <th className="p-3">بستانکار</th>
+            <th className="p-3">پرداختی</th>
             <th className="p-3">مانده</th>
           </tr>
         </thead>
 
         <tbody className="divide-y divide-[#293642]">
-          {ledgerData.entries.map((entry: any) => (
+          {ledgerData.entries.map((entry) => (
             <tr key={entry.id} className="text-slate-300">
               <td className="whitespace-nowrap p-3">
                 {new Date(entry.date).toLocaleDateString("fa-IR-u-ca-persian")}
@@ -995,7 +1256,9 @@ const response = await fetch(
                 )}
                 {entry.direction === "INFO" && (
                   <p className="text-xs text-slate-400">
-                    مبلغ حساب دفتری: {formatLedgerAmount(entry.amount)} (بدون اثر نقدی بر مانده)
+                    {entry.paymentMethod === "CHECK" && !entry.paymentDetails?.checkClearedAt
+                      ? `چک در انتظار پاس‌شدن است؛ ${formatLedgerAmount(entry.amount)} هنوز از بدهی کسر نشده است.`
+                      : `مبلغ حساب دفتری: ${formatLedgerAmount(entry.amount)} (بدون اثر نقدی بر مانده)`}
                   </p>
                 )}
                 {entry.paymentDetails && Object.entries(entry.paymentDetails)
@@ -1005,6 +1268,7 @@ const response = await fetch(
                       checkNumber: "شماره چک",
                       checkIssuedAt: "تاریخ صدور",
                       checkDueAt: "سررسید",
+                      checkClearedAt: "تاریخ پاس‌شدن",
                       payableTo: "در وجه",
                       destinationDetails: "حساب/کارت مقصد",
                     };
@@ -1055,6 +1319,88 @@ const response = await fetch(
 </div>
         </div>
       ) : null}
+    </div>
+  </Modal>
+)}
+{ledgerInvoiceDetailError && (
+  <Modal
+    title="جزئیات فاکتور"
+    onClose={() => setLedgerInvoiceDetailError("")}
+  >
+    <p role="alert" className="text-sm text-red-400">{ledgerInvoiceDetailError}</p>
+  </Modal>
+)}
+{ledgerInvoiceDetail && (
+  <Modal
+    title={`${ledgerInvoiceDetail.type === "SALE" ? "جزئیات فاکتور فروش" : "جزئیات فاکتور خرید"} · ${ledgerInvoiceDetail.invoiceNumber}`}
+    onClose={() => setLedgerInvoiceDetail(null)}
+  >
+    <div className="space-y-4">
+      <div className="grid gap-3 text-sm sm:grid-cols-2">
+        <p className="text-slate-400">
+          تاریخ: <span className="text-white">{new Date(ledgerInvoiceDetail.invoiceDate).toLocaleDateString("fa-IR-u-ca-persian")}</span>
+        </p>
+        <p className="text-slate-400">
+          وضعیت: <span className="text-white">{ledgerInvoiceDetail.status === "ISSUED" ? "صادرشده" : ledgerInvoiceDetail.status === "DRAFT" ? "پیش‌نویس" : "لغوشده"}</span>
+        </p>
+      </div>
+
+      <div className="overflow-x-auto rounded-xl border border-[#293642]">
+        <table className="w-full min-w-[560px] text-right text-sm">
+          <thead className="bg-[#111b24] text-xs text-slate-400">
+            <tr>
+              <th className="p-3">کالا</th>
+              <th className="p-3">تعداد</th>
+              <th className="p-3">قیمت واحد</th>
+              <th className="p-3">مبلغ</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#293642]">
+            {ledgerInvoiceDetail.items.map((item) => (
+              <tr key={item.id} className="text-slate-300">
+                <td className="p-3 text-white">{item.product.name}</td>
+                <td className="p-3">{new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 3 }).format(Number(item.quantity))} {item.product.unit}</td>
+                <td className="p-3">{formatLedgerAmount(item.unitPrice)}</td>
+                <td className="p-3">{formatLedgerAmount(item.total)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="space-y-2 rounded-xl border border-[#293642] bg-[#111b24] p-4 text-sm">
+        <div className="flex justify-between text-slate-300"><span>جمع کالاها</span><span>{formatLedgerAmount(ledgerInvoiceDetail.subtotal)}</span></div>
+        <div className="flex justify-between text-slate-300"><span>تخفیف{ledgerInvoiceDetail.discountPercent ? ` (${ledgerInvoiceDetail.discountPercent}٪)` : ""}</span><span>{formatLedgerAmount(ledgerInvoiceDetail.discount)}</span></div>
+        <div className="flex justify-between text-slate-300"><span>هزینه جانبی</span><span>{formatLedgerAmount(ledgerInvoiceDetail.extraCosts)}</span></div>
+        <div className="flex justify-between border-t border-[#293642] pt-2 font-bold text-white"><span>مبلغ نهایی</span><span>{formatLedgerAmount(ledgerInvoiceDetail.total)}</span></div>
+        <div className="flex justify-between text-green-400"><span>پرداخت واقعی ثبت‌شده</span><span>{formatLedgerAmount(ledgerInvoiceDetail.paidAmount)}</span></div>
+        <div className="flex justify-between font-semibold text-amber-400"><span>{ledgerInvoiceDetail.type === "SALE" ? "مانده بدهی مشتری پس از مرجوعی‌ها" : "مانده بدهی به تأمین‌کننده پس از مرجوعی‌ها"}</span><span>{formatLedgerAmount(ledgerInvoiceDetail.balanceDue)}</span></div>
+      </div>
+
+      <section className="rounded-xl border border-[#293642] p-4">
+        <h3 className="mb-2 font-bold text-white">پرداخت‌ها و اطلاعات تکمیلی</h3>
+        {ledgerInvoiceDetail.payments.length === 0 ? (
+          <p className="text-sm text-slate-500">پرداختی برای این فاکتور ثبت نشده است.</p>
+        ) : ledgerInvoiceDetail.payments.map((payment, index) => (
+          <div key={`${payment.method}-${index}`} className="border-t border-[#293642] py-3 text-sm text-slate-300">
+            <p className="font-semibold text-white">
+              {paymentMethodLabels[payment.method] ?? payment.method} · {formatLedgerAmount(payment.amount)}
+              {payment.status === "PENDING" ? " · در انتظار تأیید" : ""}
+              {payment.method === "CHECK" ? payment.checkClearedAt ? " · پاس‌شده" : " · پاس‌نشده" : ""}
+            </p>
+            {payment.description && <p className="mt-1 text-xs text-slate-400">شرح: {payment.description}</p>}
+            {payment.checkNumber && <p className="mt-1 text-xs text-slate-400">شماره چک: {payment.checkNumber}</p>}
+            {payment.checkIssuedAt && <p className="mt-1 text-xs text-slate-400">تاریخ صدور: {new Date(payment.checkIssuedAt).toLocaleDateString("fa-IR-u-ca-persian")}</p>}
+            {payment.checkDueAt && <p className="mt-1 text-xs text-slate-400">تاریخ سررسید: {new Date(payment.checkDueAt).toLocaleDateString("fa-IR-u-ca-persian")}</p>}
+            {payment.checkClearedAt && <p className="mt-1 text-xs text-slate-400">تاریخ واقعی پاس‌شدن: {new Date(payment.checkClearedAt).toLocaleDateString("fa-IR-u-ca-persian")}</p>}
+            {payment.payableTo && <p className="mt-1 text-xs text-slate-400">در وجه: {payment.payableTo}</p>}
+            {payment.destinationDetails && <p className="mt-1 text-xs text-slate-400">مقصد: {payment.destinationDetails}</p>}
+          </div>
+        ))}
+      </section>
+      {ledgerInvoiceDetail.description && (
+        <p className="rounded-xl border border-[#293642] p-4 text-sm text-slate-300">توضیحات: {ledgerInvoiceDetail.description}</p>
+      )}
     </div>
   </Modal>
 )}

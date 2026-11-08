@@ -171,12 +171,13 @@ if (
         ELSE NULL END AS "description",
         NULL::text AS "paymentMethod",
         NULL::text AS "trackingNumber",
-        NULL::text AS "invoiceId",
+        i."id" AS "invoiceId",
         NULL::text AS "checkNumber",
         NULL::timestamptz AS "checkIssuedAt",
         NULL::timestamptz AS "checkDueAt",
         NULL::text AS "payableTo",
         NULL::text AS "destinationDetails",
+        NULL::timestamptz AS "checkClearedAt",
         CASE WHEN i."type" = 'SALE' THEN i."total" ELSE -i."total" END AS "signedAmount"
       FROM "Invoice" i
       WHERE i."businessId" = ${businessId}
@@ -202,6 +203,7 @@ if (
         NULL::timestamptz AS "checkDueAt",
         NULL::text AS "payableTo",
         NULL::text AS "destinationDetails",
+        NULL::timestamptz AS "checkClearedAt",
         r."total" AS "signedAmount"
       FROM "PurchaseReturn" r
       JOIN "Invoice" i ON i."id" = r."invoiceId"
@@ -227,6 +229,7 @@ if (
         NULL::timestamptz AS "checkDueAt",
         NULL::text AS "payableTo",
         NULL::text AS "destinationDetails",
+        NULL::timestamptz AS "checkClearedAt",
         -r."total" AS "signedAmount"
       FROM "SalesReturn" r
       JOIN "Invoice" i ON i."id" = r."invoiceId"
@@ -239,7 +242,8 @@ if (
       SELECT
         p."id",
         'PAYMENT'::text AS "kind",
-        p."paidAt" AS "date",
+        CASE WHEN p."method" = 'CHECK' AND p."checkClearedAt" IS NOT NULL
+          THEN p."checkClearedAt" ELSE p."paidAt" END AS "date",
         CASE
           WHEN p."method" = 'LEDGER' THEN 'ثبت در حساب دفتری'
           WHEN p."type" = 'RECEIPT' THEN 'دریافت وجه'
@@ -248,6 +252,7 @@ if (
         COALESCE(pr."returnNumber", sr."returnNumber", i."invoiceNumber") AS "reference",
         CASE
           WHEN p."method" = 'LEDGER' THEN 'INFO'
+          WHEN p."method" = 'CHECK' AND p."checkClearedAt" IS NULL THEN 'INFO'
           WHEN p."type" = 'RECEIPT' THEN 'CREDIT'
           ELSE 'DEBIT'
         END AS "direction",
@@ -261,8 +266,9 @@ if (
         p."checkDueAt" AS "checkDueAt",
         p."payableTo" AS "payableTo",
         p."destinationDetails" AS "destinationDetails",
+        p."checkClearedAt" AS "checkClearedAt",
         CASE
-          WHEN p."method" = 'LEDGER' THEN 0
+          WHEN p."method" = 'LEDGER' OR (p."method" = 'CHECK' AND p."checkClearedAt" IS NULL) THEN 0
           WHEN p."type" = 'RECEIPT' THEN -p."amount"
           ELSE p."amount"
         END AS "signedAmount"
@@ -322,6 +328,7 @@ if (
       checkNumber: string | null;
       checkIssuedAt: Date | null;
       checkDueAt: Date | null;
+      checkClearedAt: Date | null;
       payableTo: string | null;
       destinationDetails: string | null;
       signedAmount: bigint;
@@ -364,6 +371,7 @@ if (
                 checkNumber: entry.checkNumber,
                 checkIssuedAt: entry.checkIssuedAt?.toISOString() ?? null,
                 checkDueAt: entry.checkDueAt?.toISOString() ?? null,
+                checkClearedAt: entry.checkClearedAt?.toISOString() ?? null,
                 payableTo: entry.payableTo,
                 destinationDetails: entry.destinationDetails,
               },

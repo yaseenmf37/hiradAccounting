@@ -13,6 +13,7 @@ import {
   Coins,
   ChartNoAxesCombined,
   AlertTriangle,
+  X,
 } from "lucide-react";
 import DatePicker from "react-multi-date-picker";
 import persian from "react-date-object/calendars/persian";
@@ -43,11 +44,35 @@ type MonthlyItem = {
   month: string;
   sales: string;
   purchases: string;
+  salesPurchaseDifference: string;
   receipts: string;
-  payments: string;
+  cashReceipts: string;
+  posReceipts: string;
+  passedChecks: string;
+  unpassedChecks: string;
+  passedPaymentChecks: string;
+  unpassedPaymentChecks: string;
+  ledgerReceipts: string;
+  ledgerPayments: string;
+  otherReceipts: string;
+  otherPayments: string;
   expenses: string;
   costOfGoodsSold: string;
   grossProfit: string;
+  netProfit: string;
+  uncostedSales: string;
+};
+
+type ProductPerformanceItem = {
+  month: string;
+  productId: string;
+  productName: string;
+  quantitySold: string;
+  sales: string;
+  discount: string;
+  returns: string;
+  costOfGoodsSold: string;
+  grossProfit: string | null;
   uncostedSales: string;
 };
 
@@ -61,6 +86,18 @@ type ReportsData = {
     sales: SummaryItem;
     purchases: SummaryItem;
     receipts: SummaryItem;
+    receiptBreakdown: {
+      cash: string;
+      pos: string;
+      passedChecks: string;
+      unpassedChecks: string;
+      ledger: string;
+      other: string;
+    };
+    paymentCheckBreakdown: {
+      passed: string;
+      unpassed: string;
+    };
     payments: SummaryItem;
     expenses: SummaryItem;
     costedSales: SummaryItem;
@@ -70,12 +107,16 @@ type ReportsData = {
     grossProfit: {
       amount: string;
     };
+    netProfit: {
+      amount: string;
+    };
     uncostedSales: SummaryItem;
   };
   costing: {
     availableFrom: string;
     hasUncostedSales: boolean;
   };
+  productPerformance: ProductPerformanceItem[];
   monthlyPerformance: MonthlyItem[];
 };
 
@@ -110,6 +151,25 @@ function getGregorianDate(value: {
   );
 }
 
+function formatQuantityAmount(value: string) {
+  const negative = value.startsWith("-");
+  const normalized = negative ? value.slice(1) : value;
+  const [whole = "0", fraction = ""] = normalized.split(".");
+  const thousandths =
+    BigInt(whole || "0") * 1000n + BigInt(fraction.padEnd(3, "0").slice(0, 3) || "0");
+  const wholePart = (thousandths / 1000n).toLocaleString("fa-IR");
+  const fractionalPart = (thousandths % 1000n)
+    .toString()
+    .padStart(3, "0")
+    .replace(/0+$/, "");
+
+  return `${negative ? "−" : ""}${wholePart}${
+    fractionalPart
+      ? `.${fractionalPart.replace(/\d/g, (digit) => "۰۱۲۳۴۵۶۷۸۹"[Number(digit)])}`
+      : ""
+  }`;
+}
+
 function formatAmount(amount: string, unit: CurrencyUnit) {
   return formatCurrency(BigInt(amount), unit);
 }
@@ -119,6 +179,7 @@ function formatMonth(month: string) {
 
   return new Intl.DateTimeFormat("fa-IR", {
     month: "short",
+    year: "numeric",
     timeZone: "UTC",
   }).format(new Date(Date.UTC(year, monthNumber - 1, 1)));
 }
@@ -170,10 +231,186 @@ function StatCard({
   );
 }
 
+function MonthlyProductDetailsModal({
+  month,
+  unit,
+  onClose,
+}: {
+  month: string;
+  unit: CurrencyUnit;
+  onClose: () => void;
+}) {
+  const [items, setItems] = useState<ProductPerformanceItem[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const [year, monthNumber] = month.split("-").map(Number);
+    const from = new Date(Date.UTC(year, monthNumber - 1, 1));
+    const to = new Date(Date.UTC(year, monthNumber, 0, 23, 59, 59, 999));
+    const params = new URLSearchParams({
+      from: from.toISOString(),
+      to: to.toISOString(),
+    });
+
+    void (async () => {
+      try {
+        setLoading(true);
+        setError("");
+        const response = await fetch(`/api/reports?${params.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const result = await response.json();
+
+        if (!response.ok) {
+          throw new Error(result.error || "دریافت جزئیات سود محصولات ناموفق بود.");
+        }
+
+        if (!Array.isArray(result.productPerformance)) {
+          throw new Error("ساختار جزئیات محصولات از سرور معتبر نیست.");
+        }
+
+        setItems(
+          (result.productPerformance as ProductPerformanceItem[]).filter(
+            (item) => item.month === month
+          )
+        );
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setError(
+          err instanceof Error
+            ? err.message
+            : "دریافت جزئیات سود محصولات ناموفق بود."
+        );
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    })();
+
+    return () => controller.abort();
+  }, [month]);
+
+  const total = (field: "sales" | "costOfGoodsSold") =>
+    (items ?? []).reduce((sum, item) => sum + BigInt(item[field]), 0n);
+  const knownProfit = (items ?? []).reduce(
+    (sum, item) => sum + (item.grossProfit === null ? 0n : BigInt(item.grossProfit)),
+    0n
+  );
+  const hasUnknownProfit = (items ?? []).some((item) => item.grossProfit === null);
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3 sm:p-6"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="monthly-product-details-title"
+        className="flex max-h-[90dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#15191e] shadow-2xl"
+        dir="rtl"
+      >
+        <header className="flex items-start justify-between gap-4 border-b border-white/[0.07] p-5">
+          <div>
+            <h2 id="monthly-product-details-title" className="font-bold text-white">
+              جزئیات سود محصولات · {formatMonth(month)}
+            </h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              تعداد و مبالغ بر اساس فاکتورهای تاریخی و مرجوعی‌های همین ماه است.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="بستن جزئیات"
+            className="rounded-lg p-2 text-zinc-400 hover:bg-white/10 hover:text-white"
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          {loading ? (
+            <p className="py-12 text-center text-sm text-zinc-400">
+              در حال دریافت جزئیات محصولات...
+            </p>
+          ) : error ? (
+            <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-300">
+              {error}
+            </div>
+          ) : items?.length ? (
+            <>
+              {hasUnknownProfit && (
+                <p className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] p-3 text-xs leading-6 text-amber-200">
+                  سود محصولاتی که تمام بهای تمام‌شده آن‌ها مشخص نیست، قطعی نمایش داده نمی‌شود.
+                  جمع سود پایین فقط اقلام دارای بهای قابل محاسبه را شامل می‌شود.
+                </p>
+              )}
+              <div className="overflow-x-auto rounded-xl border border-white/[0.07]">
+                <table className="w-full min-w-[850px] text-sm">
+                  <thead className="bg-white/[0.025] text-right text-xs text-zinc-500">
+                    <tr>
+                      <th className="p-3 font-medium">نام محصول</th>
+                      <th className="p-3 font-medium">تعداد فروخته‌شده</th>
+                      <th className="p-3 font-medium">مبلغ فروش</th>
+                      <th className="p-3 font-medium">تخفیف تخصیص‌یافته</th>
+                      <th className="p-3 font-medium">بهای تمام‌شده</th>
+                      <th className="p-3 font-medium">سود محصول</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/[0.05]">
+                    {items.map((item) => (
+                      <tr key={`${item.month}-${item.productId}`} className="text-zinc-300">
+                        <td className="p-3 font-medium text-white">{item.productName}</td>
+                        <td className="p-3">{formatQuantityAmount(item.quantitySold)}</td>
+                        <td className="p-3 text-emerald-400">{formatAmount(item.sales, unit)}</td>
+                        <td className="p-3 text-amber-300">{formatAmount(item.discount, unit)}</td>
+                        <td className="p-3 text-orange-300">{formatAmount(item.costOfGoodsSold, unit)}</td>
+                        <td className="p-3 text-violet-300">
+                          {item.grossProfit === null
+                            ? "نامشخص؛ بهای تمام‌شده ناقص"
+                            : formatAmount(item.grossProfit, unit)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="border-t border-white/10 bg-white/[0.025] font-semibold text-white">
+                    <tr>
+                      <td className="p-3">مجموع</td>
+                      <td className="p-3">—</td>
+                      <td className="p-3 text-emerald-400">{formatAmount(total("sales").toString(), unit)}</td>
+                      <td className="p-3">—</td>
+                      <td className="p-3 text-orange-300">{formatAmount(total("costOfGoodsSold").toString(), unit)}</td>
+                      <td className="p-3 text-violet-300">
+                        {formatAmount(knownProfit.toString(), unit)}
+                        {hasUnknownProfit ? " · بخشی نامشخص" : ""}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </>
+          ) : (
+            <p className="py-12 text-center text-sm text-zinc-500">
+              برای این ماه اطلاعاتی از فروش یا مرجوعی محصولات ثبت نشده است.
+            </p>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function ReportsClient({ currencyUnit }: Props) {
   const [data, setData] = useState<ReportsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [selectedProductMonth, setSelectedProductMonth] = useState<string | null>(null);
 
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -248,6 +485,13 @@ export default function ReportsClient({ currencyUnit }: Props) {
           icon: ChartNoAxesCombined,
           color: "bg-violet-500/10 text-violet-400",
           description: "فقط فروش‌های دارای بهای تمام‌شده",
+        },
+        {
+          title: "سود خالص",
+          amount: data.summary.netProfit.amount,
+          icon: Coins,
+          color: "bg-cyan-500/10 text-cyan-400",
+          description: "سود ناخالص پس از کسر هزینه‌ها",
         },
         {
           title: "بهای تمام‌شده فروش",
@@ -430,13 +674,58 @@ export default function ReportsClient({ currencyUnit }: Props) {
             ))}
           </div>
 
+          <section className="rounded-2xl border border-white/[0.07] bg-[#15191e] p-5">
+            <h3 className="mb-4 font-bold text-white">تفکیک دریافتی‌ها</h3>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {[
+                ["نقدی", data.summary.receiptBreakdown.cash],
+                ["کارت‌خوان", data.summary.receiptBreakdown.pos],
+                ["چک پاس‌شده", data.summary.receiptBreakdown.passedChecks],
+                ["چک پاس‌نشده", data.summary.receiptBreakdown.unpassedChecks],
+                ["حساب دفتری", data.summary.receiptBreakdown.ledger],
+                ["سایر روش‌ها", data.summary.receiptBreakdown.other],
+              ].map(([label, amount]) => (
+                <div key={label} className="rounded-xl bg-white/[0.025] p-4">
+                  <p className="text-xs text-zinc-500">{label}</p>
+                  <p className="mt-2 font-bold text-zinc-200">
+                    {formatAmount(amount, unit)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-6 text-zinc-500">
+              چک پاس‌نشده و حساب دفتری جدا از دریافتی نقدشده‌اند. چک‌های قدیمی
+              فاقد تاریخ پاس‌شدن، تا زمان ثبت تاریخ واقعی، پاس‌نشده/نامشخص محسوب می‌شوند.
+            </p>
+          </section>
+
+          <section className="rounded-2xl border border-white/[0.07] bg-[#15191e] p-5">
+            <h3 className="mb-4 font-bold text-white">وضعیت چک‌های پرداختی</h3>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {[
+                ["چک پرداختی پاس‌شده", data.summary.paymentCheckBreakdown.passed],
+                ["چک پرداختی پاس‌نشده", data.summary.paymentCheckBreakdown.unpassed],
+              ].map(([label, amount]) => (
+                <div key={label} className="rounded-xl bg-white/[0.025] p-4">
+                  <p className="text-xs text-zinc-500">{label}</p>
+                  <p className="mt-2 font-bold text-zinc-200">
+                    {formatAmount(amount, unit)}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-3 text-xs leading-6 text-zinc-500">
+              چک پرداختی تا زمان ثبت تاریخ واقعی پاس‌شدن، پرداخت نقدشده محسوب نمی‌شود.
+            </p>
+          </section>
+
           <div className="rounded-2xl border border-white/[0.07] bg-[#15191e] p-5">
             <div className="mb-6">
               <h3 className="font-bold text-white">
                 عملکرد ماهانه
               </h3>
               <p className="mt-1 text-xs text-zinc-500">
-                مقایسه فروش، خرید، هزینه‌ها و سود ناخالص
+                مقایسه فروش، خرید، سود محصولات و سود خالص
               </p>
             </div>
 
@@ -478,17 +767,17 @@ export default function ReportsClient({ currencyUnit }: Props) {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1050px] text-sm">
+              <table className="w-full min-w-[1250px] text-sm">
                 <thead>
                   <tr className="bg-white/[0.025] text-right text-xs text-zinc-500">
                     <th className="px-5 py-4 font-medium">ماه</th>
                     <th className="px-5 py-4 font-medium">فروش</th>
                     <th className="px-5 py-4 font-medium">خرید</th>
-                    <th className="px-5 py-4 font-medium">بهای تمام‌شده</th>
-                    <th className="px-5 py-4 font-medium">سود ناخالص</th>
-                    <th className="px-5 py-4 font-medium">دریافت</th>
-                    <th className="px-5 py-4 font-medium">پرداخت</th>
+                    <th className="px-5 py-4 font-medium">اختلاف فروش و خرید</th>
+                    <th className="px-5 py-4 font-medium">سود</th>
+                    <th className="px-5 py-4 font-medium">گردش پول</th>
                     <th className="px-5 py-4 font-medium">هزینه</th>
+                    <th className="px-5 py-4 font-medium">سود خالص</th>
                   </tr>
                 </thead>
 
@@ -499,7 +788,13 @@ export default function ReportsClient({ currencyUnit }: Props) {
                       className="border-t border-white/[0.05] text-zinc-300"
                     >
                       <td className="px-5 py-4 font-medium">
-                        {formatMonth(item.month)}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProductMonth(item.month)}
+                          className="text-emerald-300 underline decoration-dotted underline-offset-4 hover:text-emerald-200"
+                        >
+                          {formatMonth(item.month)}
+                        </button>
                       </td>
 
                       <td className="px-5 py-4 text-emerald-400">
@@ -510,24 +805,34 @@ export default function ReportsClient({ currencyUnit }: Props) {
                         {formatAmount(item.purchases, unit)}
                       </td>
 
-                      <td className="px-5 py-4 text-amber-400">
-                        {formatAmount(item.costOfGoodsSold, unit)}
+                      <td className={`px-5 py-4 ${BigInt(item.salesPurchaseDifference) < 0n ? "text-rose-400" : "text-zinc-300"}`}>
+                        {formatAmount(item.salesPurchaseDifference, unit)}
                       </td>
 
                       <td className="px-5 py-4 text-violet-400">
                         {formatAmount(item.grossProfit, unit)}
                       </td>
 
-                      <td className="px-5 py-4 text-teal-400">
-                        {formatAmount(item.receipts, unit)}
-                      </td>
-
-                      <td className="px-5 py-4 text-orange-400">
-                        {formatAmount(item.payments, unit)}
+                      <td className="px-5 py-4">
+                        <dl className="grid min-w-[310px] grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                          <dt className="text-zinc-500">دریافت نقدی</dt><dd className="text-teal-300">{formatAmount(item.cashReceipts, unit)}</dd>
+                          <dt className="text-zinc-500">دریافت کارت‌خوان</dt><dd className="text-teal-300">{formatAmount(item.posReceipts, unit)}</dd>
+                          <dt className="text-zinc-500">چک دریافتی پاس‌شده</dt><dd className="text-teal-300">{formatAmount(item.passedChecks, unit)}</dd>
+                          <dt className="text-zinc-500">چک دریافتی پاس‌نشده</dt><dd className="text-amber-300">{formatAmount(item.unpassedChecks, unit)}</dd>
+                          <dt className="text-zinc-500">چک پرداختی پاس‌شده</dt><dd className="text-orange-300">{formatAmount(item.passedPaymentChecks, unit)}</dd>
+                          <dt className="text-zinc-500">چک پرداختی پاس‌نشده</dt><dd className="text-amber-300">{formatAmount(item.unpassedPaymentChecks, unit)}</dd>
+                          <dt className="text-zinc-500">فروش دفتری (وصول‌نشده)</dt><dd className="text-zinc-300">{formatAmount(item.ledgerReceipts, unit)}</dd>
+                          <dt className="text-zinc-500">خرید دفتری (پرداخت‌نشده)</dt><dd className="text-zinc-300">{formatAmount(item.ledgerPayments, unit)}</dd>
+                          <dt className="text-zinc-500">سایر دریافت‌ها</dt><dd className="text-teal-300">{formatAmount(item.otherReceipts, unit)}</dd>
+                          <dt className="text-zinc-500">سایر پرداخت‌های واقعی</dt><dd className="text-orange-300">{formatAmount(item.otherPayments, unit)}</dd>
+                        </dl>
                       </td>
 
                       <td className="px-5 py-4 text-rose-400">
                         {formatAmount(item.expenses, unit)}
+                      </td>
+                      <td className="px-5 py-4 text-cyan-400">
+                        {formatAmount(item.netProfit, unit)}
                       </td>
                     </tr>
                   ))}
@@ -547,15 +852,74 @@ export default function ReportsClient({ currencyUnit }: Props) {
             </div>
           </div>
 
+          {/* <div className="overflow-hidden rounded-2xl border border-white/[0.07] bg-[#15191e]">
+            <div className="border-b border-white/[0.07] p-5">
+              <h3 className="font-bold text-white">سود هر کالا در بازه گزارش</h3>
+              <p className="mt-1 text-xs text-zinc-500">
+                قیمت فروش و بهای تاریخی ردیف‌های فاکتور و مرجوعی‌ها؛ سود بخش فاقد بهای ثبت‌شده محاسبه نمی‌شود.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[850px] text-sm">
+                <thead>
+                  <tr className="bg-white/[0.025] text-right text-xs text-zinc-500">
+                    <th className="px-5 py-4 font-medium">ماه</th>
+                    <th className="px-5 py-4 font-medium">کالا</th>
+                    <th className="px-5 py-4 font-medium">تعداد فروخته‌شده</th>
+                    <th className="px-5 py-4 font-medium">مبلغ فروش</th>
+                    <th className="px-5 py-4 font-medium">تخفیف تخصیص‌یافته</th>
+                    <th className="px-5 py-4 font-medium">بهای تمام‌شده</th>
+                    <th className="px-5 py-4 font-medium">سود محصول</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.productPerformance.map((item) => (
+                    <tr key={`${item.month}-${item.productId}`} className="border-t border-white/[0.05] text-zinc-300">
+                      <td className="px-5 py-4">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProductMonth(item.month)}
+                          className="text-emerald-300 underline decoration-dotted underline-offset-4 hover:text-emerald-200"
+                        >
+                          {formatMonth(item.month)}
+                        </button>
+                      </td>
+                      <td className="px-5 py-4 font-medium text-white">{item.productName}</td>
+                      <td className="px-5 py-4">{formatQuantityAmount(item.quantitySold)}</td>
+                      <td className="px-5 py-4 text-emerald-400">{formatAmount(item.sales, unit)}</td>
+                      <td className="px-5 py-4 text-amber-300">{formatAmount(item.discount, unit)}</td>
+                      <td className="px-5 py-4 text-amber-400">{formatAmount(item.costOfGoodsSold, unit)}</td>
+                      <td className="px-5 py-4 text-violet-400">
+                        {item.grossProfit === null
+                          ? "نامشخص؛ بهای تمام‌شده ناقص"
+                          : formatAmount(item.grossProfit, unit)}
+                      </td>
+                    </tr>
+                  ))}
+                  {data.productPerformance.length === 0 && (
+                    <tr><td colSpan={7} className="px-5 py-10 text-center text-zinc-500">اطلاعاتی برای نمایش وجود ندارد.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div> */}
+
           <p className="text-xs leading-6 text-zinc-500">
-            سود ناخالص از کسر بهای تمام‌شده کالای فروش‌رفته از
+            سود از کسر بهای تمام‌شده کالای فروش‌رفته از
             فروش‌های دارای اطلاعات بهای تمام‌شده محاسبه می‌شود.
-            فروش‌های فاقد بهای تمام‌شده در این محاسبه لحاظ
-            نمی‌شوند. این عدد سود خالص نیست و هزینه‌های عملیاتی
+            سود محصول فاقد بهای تمام‌شده کامل، قطعی اعلام نمی‌شود.
+            این عدد سود خالص نیست و هزینه‌های عملیاتی
             از آن کسر نشده‌اند.
           </p>
         </>
       ) : null}
+      {selectedProductMonth && (
+        <MonthlyProductDetailsModal
+          month={selectedProductMonth}
+          unit={unit}
+          onClose={() => setSelectedProductMonth(null)}
+        />
+      )}
     </div>
   );
 }

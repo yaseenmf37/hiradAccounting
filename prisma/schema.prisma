@@ -36,25 +36,26 @@ model Session {
 }
 
 model Business {
-  id           String              @id @default(cuid())
-  name         String
-  phone        String?
-  isActive     Boolean             @default(true)
-  ownerId      String              @unique
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
-  currencyUnit CurrencyUnit        @default(TOMAN)
-  owner        User                @relation("BusinessOwner", fields: [ownerId], references: [id])
-  contacts     Contact[]
-  expenses     Expense[]
-  movements    InventoryMovement[]
-  invoices     Invoice[]
-  payments     Payment[]
-  products     Product[]
-  priceChanges ProductPriceHistory[]
-  backorders   Backorder[]
-  purchaseReturns PurchaseReturn[]
-  salesReturns SalesReturn[]
+  id                String                @id @default(cuid())
+  name              String
+  phone             String?
+  isActive          Boolean               @default(true)
+  ownerId           String                @unique
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  currencyUnit      CurrencyUnit          @default(TOMAN)
+  nextInvoiceNumber BigInt                @default(1000)
+  owner             User                  @relation("BusinessOwner", fields: [ownerId], references: [id])
+  contacts          Contact[]
+  expenses          Expense[]
+  movements         InventoryMovement[]
+  invoices          Invoice[]
+  payments          Payment[]
+  products          Product[]
+  priceChanges      ProductPriceHistory[]
+  backorders        Backorder[]
+  purchaseReturns   PurchaseReturn[]
+  salesReturns      SalesReturn[]
 }
 
 model Category {
@@ -68,30 +69,30 @@ model Category {
 }
 
 model Product {
-  id            String              @id @default(cuid())
-  businessId    String
-  categoryId    String?
-  name          String
-  sku           String?
-  unit          String              @default("عدد")
-  averageCost   Decimal             @default(0) @db.Decimal(30, 9)
-  inventoryValue BigInt             @default(0)
-  purchasePrice BigInt              @default(0)
-  salePrice     BigInt              @default(0)
-  stock         Decimal             @default(0) @db.Decimal(18, 3)
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  barcode       String?
-  isActive      Boolean             @default(true)
-  minStock      Decimal             @default(0) @db.Decimal(18, 3)
-  movements     InventoryMovement[]
-  invoiceItems  InvoiceItem[]
+  id                  String                @id @default(cuid())
+  businessId          String
+  categoryId          String?
+  name                String
+  sku                 String?
+  unit                String                @default("عدد")
+  averageCost         Decimal               @default(0) @db.Decimal(30, 9)
+  inventoryValue      BigInt                @default(0)
+  purchasePrice       BigInt                @default(0)
+  salePrice           BigInt                @default(0)
+  stock               Decimal               @default(0) @db.Decimal(18, 3)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  barcode             String?
+  isActive            Boolean               @default(true)
+  minStock            Decimal               @default(0) @db.Decimal(18, 3)
+  movements           InventoryMovement[]
+  invoiceItems        InvoiceItem[]
   purchaseReturnItems PurchaseReturnItem[]
-  salesReturnItems SalesReturnItem[]
-  priceHistory  ProductPriceHistory[]
-  backorders    Backorder[]
-  business      Business            @relation(fields: [businessId], references: [id])
-  category      Category?           @relation(fields: [categoryId], references: [id])
+  salesReturnItems    SalesReturnItem[]
+  priceHistory        ProductPriceHistory[]
+  backorders          Backorder[]
+  business            Business              @relation(fields: [businessId], references: [id])
+  category            Category?             @relation(fields: [categoryId], references: [id])
 
   @@unique([businessId, sku])
   @@unique([businessId, barcode])
@@ -101,21 +102,21 @@ model Product {
 }
 
 model Contact {
-  id          String        @id @default(cuid())
+  id          String      @id @default(cuid())
   businessId  String
   name        String
-  type        ContactType   @default(BOTH)
+  type        ContactType @default(BOTH)
   phone       String?
   email       String?
   address     String?
   description String?
-  isActive    Boolean       @default(true)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
 
-  business    Business      @relation(fields: [businessId], references: [id])
-  invoices    Invoice[]
-  payments    Payment[]
+  business Business  @relation(fields: [businessId], references: [id])
+  invoices Invoice[]
+  payments Payment[]
 
   @@index([businessId, name])
   @@index([businessId, type, isActive])
@@ -128,35 +129,38 @@ enum ContactType {
 }
 
 model Invoice {
-  id            String              @id @default(cuid())
-  businessId    String
-  contactId     String?
-  type          InvoiceType
-  status        InvoiceStatus       @default(DRAFT)
-  invoiceNumber String
-  subtotal      BigInt              @default(0)
-  extraCosts    BigInt              @default(0)
-  discount      BigInt              @default(0)
-  total         BigInt              @default(0)
-  description   String?
-  invoiceDate   DateTime            @default(now())
-  issuedAt      DateTime?
-  costingRecordedAt DateTime?
-  createdAt     DateTime            @default(now())
-  updatedAt     DateTime            @updatedAt
-  movements     InventoryMovement[]
-  business      Business            @relation(fields: [businessId], references: [id])
-  contact       Contact?            @relation(fields: [contactId], references: [id])
-  items         InvoiceItem[]
-  payments      Payment[]
-  revisions     InvoiceRevision[]
-  backorders    Backorder[]
-  purchaseReturns PurchaseReturn[]
-  salesReturns SalesReturn[]
-  contactNameSnapshot String?
-  contactPhoneSnapshot String?
+  id                     String              @id @default(cuid())
+  businessId             String
+  contactId              String?
+  type                   InvoiceType
+  status                 InvoiceStatus       @default(DRAFT)
+  invoiceNumber          String
+  subtotal               BigInt              @default(0)
+  extraCosts             BigInt              @default(0)
+  discount               BigInt              @default(0)
+  discountPercent        Decimal?            @db.Decimal(5, 2)
+  reference              String?
+  referenceNumber        String?
+  total                  BigInt              @default(0)
+  description            String?
+  invoiceDate            DateTime            @default(now())
+  issuedAt               DateTime?
+  costingRecordedAt      DateTime?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  movements              InventoryMovement[]
+  business               Business            @relation(fields: [businessId], references: [id])
+  contact                Contact?            @relation(fields: [contactId], references: [id])
+  items                  InvoiceItem[]
+  payments               Payment[]
+  revisions              InvoiceRevision[]
+  backorders             Backorder[]
+  purchaseReturns        PurchaseReturn[]
+  salesReturns           SalesReturn[]
+  contactNameSnapshot    String?
+  contactPhoneSnapshot   String?
   contactAddressSnapshot String?
-  paymentPlanRecorded Boolean @default(false)
+  paymentPlanRecorded    Boolean             @default(false)
 
   @@unique([businessId, invoiceNumber])
   @@unique([id, businessId])
@@ -164,41 +168,41 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id             String  @id @default(cuid())
-  invoiceId      String
-  productId      String
-  quantity       Decimal @db.Decimal(18, 3)
-  unitPrice      BigInt
-  total          BigInt
+  id        String  @id @default(cuid())
+  invoiceId String
+  productId String
+  quantity  Decimal @db.Decimal(18, 3)
+  unitPrice BigInt
+  total     BigInt
 
-  costOfGoodsSold BigInt @default(0)
-  costedQuantity Decimal @default(0) @db.Decimal(18, 3)
+  costOfGoodsSold BigInt  @default(0)
+  costedQuantity  Decimal @default(0) @db.Decimal(18, 3)
 
-  invoice        Invoice @relation(fields: [invoiceId], references: [id])
-  product        Product @relation(fields: [productId], references: [id])
-  backorder      Backorder?
+  invoice         Invoice              @relation(fields: [invoiceId], references: [id])
+  product         Product              @relation(fields: [productId], references: [id])
+  backorder       Backorder?
   purchaseReturns PurchaseReturnItem[]
-  salesReturns   SalesReturnItem[]
+  salesReturns    SalesReturnItem[]
 
   @@unique([id, invoiceId, productId])
 }
 
 model Expense {
-  id          String          @id @default(cuid())
-  businessId  String
-  title       String
-  category    ExpenseCategory @default(OTHER)
-  amount      BigInt
-  method      PaymentMethod   @default(CASH)
-  status      ExpenseStatus   @default(CONFIRMED)
-  description String?
-  spentAt     DateTime        @default(now())
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  cancelledAt DateTime?
+  id           String          @id @default(cuid())
+  businessId   String
+  title        String
+  category     ExpenseCategory @default(OTHER)
+  amount       BigInt
+  method       PaymentMethod   @default(CASH)
+  status       ExpenseStatus   @default(CONFIRMED)
+  description  String?
+  spentAt      DateTime        @default(now())
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  cancelledAt  DateTime?
   cancelReason String?
 
-  business    Business        @relation(fields: [businessId], references: [id])
+  business Business @relation(fields: [businessId], references: [id])
 
   @@index([businessId, spentAt])
   @@index([businessId, category, spentAt])
@@ -222,64 +226,66 @@ enum ExpenseStatus {
 }
 
 model InventoryMovement {
-  id             String       @id @default(cuid())
-  businessId     String
-  productId      String
-  invoiceId      String?
+  id               String       @id @default(cuid())
+  businessId       String
+  productId        String
+  invoiceId        String?
   purchaseReturnId String?
-  salesReturnId  String?
-  type           MovementType
-  quantity       Decimal      @db.Decimal(18, 3)
+  salesReturnId    String?
+  type             MovementType
+  quantity         Decimal      @db.Decimal(18, 3)
 
-  totalCost      BigInt       @default(0)
+  totalCost BigInt @default(0)
 
-  averageCost    Decimal      @default(0) @db.Decimal(30, 9)
-  description    String?
-  createdAt      DateTime     @default(now())
+  averageCost Decimal  @default(0) @db.Decimal(30, 9)
+  description String?
+  createdAt   DateTime @default(now())
 
-  business       Business     @relation(fields: [businessId], references: [id])
-  invoice        Invoice?     @relation(fields: [invoiceId], references: [id])
-  purchaseReturn PurchaseReturn? @relation(fields: [purchaseReturnId], references: [id])
-  salesReturn    SalesReturn? @relation(fields: [salesReturnId, businessId], references: [id, businessId], onDelete: Restrict)
-  product        Product      @relation(fields: [productId], references: [id])
+  business             Business              @relation(fields: [businessId], references: [id])
+  invoice              Invoice?              @relation(fields: [invoiceId], references: [id])
+  purchaseReturn       PurchaseReturn?       @relation(fields: [purchaseReturnId], references: [id])
+  salesReturn          SalesReturn?          @relation(fields: [salesReturnId, businessId], references: [id, businessId], onDelete: Restrict)
+  product              Product               @relation(fields: [productId], references: [id])
+  backorderAllocations BackorderAllocation[]
 
   @@index([businessId, productId, createdAt])
   @@index([salesReturnId])
 }
 
 model Payment {
-  id             String        @id @default(cuid())
-  businessId     String
-  contactId      String?
-  invoiceId      String?
-  purchaseReturnId String?
-  salesReturnId  String?
+  id                String  @id @default(cuid())
+  businessId        String
+  contactId         String?
+  invoiceId         String?
+  purchaseReturnId  String?
+  salesReturnId     String?
   allocationBatchId String?
 
-  type           PaymentType
-  method         PaymentMethod
-  status         PaymentStatus @default(CONFIRMED)
+  type   PaymentType
+  method PaymentMethod
+  status PaymentStatus @default(CONFIRMED)
 
-  amount         BigInt
-  trackingNumber String?
-  description    String?
-  checkNumber    String?
-  checkIssuedAt  DateTime?
-  checkDueAt     DateTime?
-  payableTo      String?
+  amount             BigInt
+  trackingNumber     String?
+  description        String?
+  checkNumber        String?
+  checkIssuedAt      DateTime?
+  checkDueAt         DateTime?
+  checkClearedAt     DateTime?
+  payableTo          String?
   destinationDetails String?
 
-  paidAt         DateTime      @default(now())
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-  cancelledAt    DateTime?
-  cancelReason   String?
+  paidAt       DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  cancelledAt  DateTime?
+  cancelReason String?
 
-  business       Business      @relation(fields: [businessId], references: [id])
-  contact        Contact?      @relation(fields: [contactId], references: [id])
-  invoice        Invoice?      @relation(fields: [invoiceId], references: [id])
+  business       Business        @relation(fields: [businessId], references: [id])
+  contact        Contact?        @relation(fields: [contactId], references: [id])
+  invoice        Invoice?        @relation(fields: [invoiceId], references: [id])
   purchaseReturn PurchaseReturn? @relation(fields: [purchaseReturnId], references: [id])
-  salesReturn    SalesReturn?  @relation(fields: [salesReturnId, businessId], references: [id, businessId], onDelete: Restrict)
+  salesReturn    SalesReturn?    @relation(fields: [salesReturnId, businessId], references: [id, businessId], onDelete: Restrict)
 
   @@index([businessId, paidAt])
   @@index([businessId, contactId, paidAt])
@@ -342,16 +348,16 @@ enum CurrencyUnit {
 }
 
 model ProductPriceHistory {
-  id         String   @id @default(cuid())
-  businessId String
-  productId  String
-  field      ProductPriceField
-  oldPrice   BigInt
-  newPrice   BigInt
+  id                  String            @id @default(cuid())
+  businessId          String
+  productId           String
+  field               ProductPriceField
+  oldPrice            BigInt
+  newPrice            BigInt
   increaseBasisPoints Int
-  createdAt  DateTime @default(now())
-  business   Business @relation(fields: [businessId], references: [id])
-  product    Product  @relation(fields: [productId], references: [id])
+  createdAt           DateTime          @default(now())
+  business            Business          @relation(fields: [businessId], references: [id])
+  product             Product           @relation(fields: [productId], references: [id])
 
   @@index([businessId, createdAt])
   @@index([productId, createdAt])
@@ -375,75 +381,44 @@ model InvoiceRevision {
 }
 
 model Backorder {
-  id              String   @id @default(cuid())
-  businessId      String
-  invoiceId        String
-  invoiceItemId   String?  @unique
-  productId       String
-  requested       Decimal  @db.Decimal(18, 3)
-  fulfilled       Decimal  @default(0) @db.Decimal(18, 3)
-  outstanding     Decimal  @db.Decimal(18, 3)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  business        Business @relation(fields: [businessId], references: [id])
-  invoice         Invoice  @relation(fields: [invoiceId], references: [id])
-  invoiceItem     InvoiceItem? @relation(fields: [invoiceItemId], references: [id], onDelete: SetNull)
-  product         Product  @relation(fields: [productId], references: [id])
-  allocations     BackorderAllocation[]
+  id                String                @id @default(cuid())
+  businessId        String
+  invoiceId         String
+  invoiceItemId     String?               @unique
+  productId         String
+  requested         Decimal               @db.Decimal(18, 3)
+  fulfilled         Decimal               @default(0) @db.Decimal(18, 3)
+  outstanding       Decimal               @db.Decimal(18, 3)
+  inventoryDeducted Boolean               @default(false)
+  cancelledAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  business          Business              @relation(fields: [businessId], references: [id])
+  invoice           Invoice               @relation(fields: [invoiceId], references: [id])
+  invoiceItem       InvoiceItem?          @relation(fields: [invoiceItemId], references: [id], onDelete: SetNull)
+  product           Product               @relation(fields: [productId], references: [id])
+  allocations       BackorderAllocation[]
 
   @@index([businessId, productId, outstanding])
   @@index([invoiceId])
 }
 
 model BackorderAllocation {
-  id          String   @id @default(cuid())
-  backorderId String
-  quantity    Decimal  @db.Decimal(18, 3)
-  createdAt   DateTime @default(now())
-  backorder   Backorder @relation(fields: [backorderId], references: [id], onDelete: Cascade)
+  id                  String             @id @default(cuid())
+  backorderId         String
+  quantity            Decimal            @db.Decimal(18, 3)
+  totalCost           BigInt             @default(0)
+  inventoryMovementId String?
+  createdAt           DateTime           @default(now())
+  backorder           Backorder          @relation(fields: [backorderId], references: [id], onDelete: Cascade)
+  inventoryMovement   InventoryMovement? @relation(fields: [inventoryMovementId], references: [id], onDelete: SetNull)
 
   @@index([backorderId, createdAt])
+  @@index([inventoryMovementId])
 }
 
 model PurchaseReturn {
-  id             String                @id @default(cuid())
-  businessId     String
-  invoiceId      String
-  returnNumber   String
-  total          BigInt
-  description    String?
-  idempotencyKey String?
-  idempotencyRequestHash String?
-  createdAt      DateTime              @default(now())
-  business       Business              @relation(fields: [businessId], references: [id])
-  invoice        Invoice               @relation(fields: [invoiceId], references: [id])
-  items          PurchaseReturnItem[]
-  payments       Payment[]
-  movements      InventoryMovement[]
-
-  @@unique([businessId, returnNumber])
-  @@unique([businessId, idempotencyKey])
-  @@index([businessId, invoiceId, createdAt])
-}
-
-model PurchaseReturnItem {
-  id               String        @id @default(cuid())
-  purchaseReturnId String
-  invoiceItemId    String
-  productId        String
-  quantity         Decimal       @db.Decimal(18, 3)
-  amount           BigInt
-  inventoryCost    BigInt
-  purchaseReturn   PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
-  invoiceItem      InvoiceItem   @relation(fields: [invoiceItemId], references: [id], onDelete: Restrict)
-  product          Product       @relation(fields: [productId], references: [id])
-
-  @@index([purchaseReturnId])
-  @@index([invoiceItemId])
-}
-
-model SalesReturn {
-  id                     String            @id @default(cuid())
+  id                     String               @id @default(cuid())
   businessId             String
   invoiceId              String
   returnNumber           String
@@ -451,9 +426,46 @@ model SalesReturn {
   description            String?
   idempotencyKey         String?
   idempotencyRequestHash String?
-  createdAt              DateTime          @default(now())
-  business               Business          @relation(fields: [businessId], references: [id], onDelete: Restrict)
-  invoice                Invoice           @relation(fields: [invoiceId, businessId], references: [id, businessId], onDelete: Restrict)
+  createdAt              DateTime             @default(now())
+  business               Business             @relation(fields: [businessId], references: [id])
+  invoice                Invoice              @relation(fields: [invoiceId], references: [id])
+  items                  PurchaseReturnItem[]
+  payments               Payment[]
+  movements              InventoryMovement[]
+
+  @@unique([businessId, returnNumber])
+  @@unique([businessId, idempotencyKey])
+  @@index([businessId, invoiceId, createdAt])
+}
+
+model PurchaseReturnItem {
+  id               String         @id @default(cuid())
+  purchaseReturnId String
+  invoiceItemId    String
+  productId        String
+  quantity         Decimal        @db.Decimal(18, 3)
+  amount           BigInt
+  inventoryCost    BigInt
+  purchaseReturn   PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  invoiceItem      InvoiceItem    @relation(fields: [invoiceItemId], references: [id], onDelete: Restrict)
+  product          Product        @relation(fields: [productId], references: [id])
+
+  @@index([purchaseReturnId])
+  @@index([invoiceItemId])
+}
+
+model SalesReturn {
+  id                     String              @id @default(cuid())
+  businessId             String
+  invoiceId              String
+  returnNumber           String
+  total                  BigInt
+  description            String?
+  idempotencyKey         String?
+  idempotencyRequestHash String?
+  createdAt              DateTime            @default(now())
+  business               Business            @relation(fields: [businessId], references: [id], onDelete: Restrict)
+  invoice                Invoice             @relation(fields: [invoiceId, businessId], references: [id, businessId], onDelete: Restrict)
   items                  SalesReturnItem[]
   payments               Payment[]
   movements              InventoryMovement[]

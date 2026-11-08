@@ -5,6 +5,7 @@ import {
 } from "@prisma/client";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 type RouteContext = {
   params: Promise<{ invoiceId: string }>;
@@ -81,6 +82,15 @@ export async function POST(
           if ((salesReturns[0]?.count ?? 0n) > 0n) {
             throw new Error("SALE_HAS_RETURNS");
           }
+          await tx.backorder.updateMany({
+            where: {
+              businessId,
+              invoiceId: invoice.id,
+              cancelledAt: null,
+              outstanding: { gt: 0 },
+            },
+            data: { cancelledAt: new Date() },
+          });
         }
 
         const groupedItems = new Map<
@@ -88,6 +98,7 @@ export async function POST(
           {
             quantity: Prisma.Decimal;
             costOfGoodsSold: bigint;
+            costedQuantity: Prisma.Decimal;
           }
         >();
 
@@ -97,10 +108,12 @@ export async function POST(
           if (current) {
             current.quantity = current.quantity.add(item.quantity);
             current.costOfGoodsSold += item.costOfGoodsSold;
+            current.costedQuantity = current.costedQuantity.add(item.costedQuantity);
           } else {
             groupedItems.set(item.productId, {
               quantity: new Prisma.Decimal(item.quantity),
               costOfGoodsSold: item.costOfGoodsSold,
+              costedQuantity: new Prisma.Decimal(item.costedQuantity),
             });
           }
         }
@@ -203,15 +216,24 @@ export async function POST(
                   newInventoryValue.toString()
                 ).div(newStock);
           } else {
-            // برگشت فروش با بهای تمام‌شده تاریخی
+            // Reverse uncosted deficit quantity without assigning it inventory value.
             totalCost = data.costOfGoodsSold;
 
-            newStock = product.stock.add(data.quantity);
-            newInventoryValue = product.inventoryValue + totalCost;
-
-            newAverageCost = new Prisma.Decimal(
-              newInventoryValue.toString()
-            ).div(newStock);
+            const inventoryWithoutCost = addInventoryStock(
+              product.stock,
+              product.inventoryValue,
+              data.quantity.sub(data.costedQuantity),
+              0n,
+            );
+            const inventory = addInventoryStock(
+              inventoryWithoutCost.stock,
+              inventoryWithoutCost.inventoryValue,
+              data.costedQuantity,
+              totalCost,
+            );
+            newStock = inventory.stock;
+            newInventoryValue = inventory.inventoryValue;
+            newAverageCost = inventory.averageCost;
           }
 
           const updated = await tx.product.updateMany({
@@ -233,21 +255,55 @@ export async function POST(
             throw new Error("STOCK_CONFLICT");
           }
 
-          await tx.inventoryMovement.create({
-            data: {
-              businessId,
-              productId,
-              invoiceId: invoice.id,
-              type:
-                invoice.type === "PURCHASE"
-                  ? "ADJUSTMENT_OUT"
-                  : "RETURN_IN",
-              quantity: data.quantity,
-              totalCost,
-              averageCost: newAverageCost,
-              description: `لغو فاکتور ${invoice.invoiceNumber}`,
-            },
-          });
+          if (invoice.type === "PURCHASE" && data.quantity.greaterThan(0)) {
+            const movement = await tx.inventoryMovement.create({
+              data: {
+                businessId,
+                productId,
+                invoiceId: invoice.id,
+                type:
+                  invoice.type === "PURCHASE"
+                    ? "ADJUSTMENT_OUT"
+                    : "RETURN_IN",
+                quantity: data.quantity,
+                totalCost,
+                averageCost: newAverageCost,
+                description: `لغو فاکتور ${invoice.invoiceNumber}`,
+              },
+            });
+            await reconcileNegativeStockBackorders(tx, movement);
+          } else if (invoice.type === "SALE") {
+            const uncostedQuantity = data.quantity.sub(data.costedQuantity);
+            if (uncostedQuantity.greaterThan(0)) {
+              await tx.inventoryMovement.create({
+                data: {
+                  businessId,
+                  productId,
+                  invoiceId: invoice.id,
+                  type: "RETURN_IN",
+                  quantity: uncostedQuantity,
+                  totalCost: 0n,
+                  averageCost: newAverageCost,
+                  description: `لغو بخش بهای‌نامشخص فاکتور ${invoice.invoiceNumber}`,
+                },
+              });
+            }
+            if (data.costedQuantity.greaterThan(0)) {
+              const movement = await tx.inventoryMovement.create({
+                data: {
+                  businessId,
+                  productId,
+                  invoiceId: invoice.id,
+                  type: "RETURN_IN",
+                  quantity: data.costedQuantity,
+                  totalCost,
+                  averageCost: newAverageCost,
+                  description: `لغو فاکتور ${invoice.invoiceNumber}`,
+                },
+              });
+              await reconcileNegativeStockBackorders(tx, movement);
+            }
+          }
         }
 
         const cancelled = await tx.invoice.updateMany({

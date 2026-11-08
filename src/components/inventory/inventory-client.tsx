@@ -51,6 +51,8 @@ type Backorder = {
   outstanding: string;
   requested: string;
   fulfilled: string;
+  inventoryDeducted: boolean;
+  cancelledAt: string | null;
   product: { name: string; unit: string; stock: string };
   invoice: { invoiceNumber: string };
   customerName: string | null;
@@ -1022,21 +1024,26 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
         <div className="rounded-2xl border border-amber-500/20 bg-[#111820]">
           <div className="border-b border-[#222d38] p-5">
             <h2 className="font-bold text-white">کسری سفارش‌های فروش</h2>
-            <p className="mt-1 text-xs text-slate-400">این مقادیر مستقل از موجودی منفی ثبت شده‌اند. {formatNumber(backorderTotal)} مورد</p>
+            <p className="mt-1 text-xs text-slate-400">موجودی منفی فعلی و مانده تأمین هر سفارش در همین فهرست پیگیری می‌شود. {formatNumber(backorderTotal)} مورد</p>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-right text-sm">
-              <thead className="text-xs text-slate-500"><tr><th className="p-4">فاکتور / مشتری</th><th className="p-4">کالا</th><th className="p-4">سفارش</th><th className="p-4">تأمین‌شده</th><th className="p-4">کسری</th><th className="p-4">عملیات</th></tr></thead>
+            <table className="w-full min-w-[900px] text-right text-sm">
+              <thead className="text-xs text-slate-500"><tr><th className="p-4">فاکتور / مشتری</th><th className="p-4">کالا</th><th className="p-4">موجودی فعلی</th><th className="p-4">سفارش</th><th className="p-4">تأمین‌شده</th><th className="p-4">مانده کسری</th><th className="p-4">عملیات</th></tr></thead>
               <tbody>
                 {backorders.map((entry) => (
                   <tr key={entry.id} className="border-t border-[#222d38] text-slate-300">
                     <td className="p-4">{entry.invoice.invoiceNumber}{entry.customerName ? ` — ${entry.customerName}` : ""}</td>
                     <td className="p-4">{entry.product.name}</td>
+                    <td className={`p-4 ${Number(entry.product.stock) < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                      {formatNumber(Math.min(Number(entry.product.stock), 0))} {entry.product.unit}
+                    </td>
                     <td className="p-4">{formatNumber(entry.requested)} {entry.product.unit}</td>
                     <td className="p-4">{formatNumber(entry.fulfilled)} {entry.product.unit}</td>
                     <td className="p-4 text-amber-400">{formatNumber(entry.outstanding)} {entry.product.unit}</td>
                     <td className="p-4">
-                      {allocatingId === entry.id ? (
+                      {entry.inventoryDeducted ? (
+                        <span className="text-xs text-slate-500">با ورود موجودی به‌صورت خودکار تسویه می‌شود</span>
+                      ) : allocatingId === entry.id ? (
                         <div className="flex gap-2">
                           <NumericInput min="0.001" max={entry.outstanding} step="0.001" value={allocationQuantity} onChange={(event) => setAllocationQuantity(event.target.value)} className="w-24 rounded border border-[#293642] bg-[#0b0f14] px-2 py-1" />
                           <button disabled={saving} onClick={() => void allocateBackorder(entry)} className="text-green-400">تخصیص</button>

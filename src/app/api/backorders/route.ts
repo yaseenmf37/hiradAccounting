@@ -23,7 +23,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ message: "محدوده صفحه‌بندی معتبر نیست." }, { status: 400 });
     }
 
-    const where = { businessId, outstanding: { gt: 0 } };
+    const where: Prisma.BackorderWhereInput = {
+      businessId,
+      cancelledAt: null,
+      outstanding: { gt: 0 },
+      invoice: { is: { type: "SALE", status: "ISSUED" } },
+    };
     const [rows, total] = await prisma.$transaction([
       prisma.backorder.findMany({
         where,
@@ -32,6 +37,8 @@ export async function GET(request: NextRequest) {
           requested: true,
           fulfilled: true,
           outstanding: true,
+          inventoryDeducted: true,
+          cancelledAt: true,
           createdAt: true,
           product: { select: { name: true, unit: true, stock: true } },
           invoice: {
@@ -57,6 +64,8 @@ export async function GET(request: NextRequest) {
         requested: entry.requested.toString(),
         fulfilled: entry.fulfilled.toString(),
         outstanding: entry.outstanding.toString(),
+        inventoryDeducted: entry.inventoryDeducted,
+        cancelledAt: entry.cancelledAt?.toISOString() ?? null,
         product: { ...entry.product, stock: entry.product.stock.toString() },
         customerName: entry.invoice.contactNameSnapshot ?? entry.invoice.contact?.name ?? null,
       })),
@@ -83,7 +92,7 @@ export async function POST(request: NextRequest) {
 
     await prisma.$transaction(async (tx) => {
       const backorder = await tx.backorder.findFirst({
-        where: { id: parsed.data.backorderId, businessId },
+        where: { id: parsed.data.backorderId, businessId, cancelledAt: null },
         include: {
           product: { select: { id: true, stock: true, averageCost: true, inventoryValue: true } },
           invoice: { select: { id: true, type: true, status: true, invoiceNumber: true } },
@@ -100,6 +109,7 @@ export async function POST(request: NextRequest) {
       if (!backorder) throw new Error("BACKORDER_NOT_FOUND");
       if (!backorder.invoiceItem) throw new Error("BACKORDER_ITEM_REPLACED");
       if (backorder.invoice.type !== "SALE" || backorder.invoice.status !== "ISSUED") throw new Error("BACKORDER_NOT_ACTIVE");
+      if (backorder.inventoryDeducted) throw new Error("NEGATIVE_STOCK_BACKORDER_AUTO_ALLOCATED");
 
       const requested = new Prisma.Decimal(parsed.data.quantity);
       if (requested.greaterThan(backorder.outstanding)) throw new Error("BACKORDER_OVER_ALLOCATION");
@@ -129,7 +139,11 @@ export async function POST(request: NextRequest) {
       if (productUpdated.count !== 1) throw new Error("STOCK_CONFLICT");
 
       const updated = await tx.backorder.updateMany({
-        where: { id: backorder.id, outstanding: backorder.outstanding },
+        where: {
+          id: backorder.id,
+          outstanding: backorder.outstanding,
+          cancelledAt: null,
+        },
         data: {
           fulfilled: { increment: requested },
           outstanding: { decrement: requested },
@@ -166,7 +180,12 @@ export async function POST(request: NextRequest) {
       });
       const [remainingBackorders, items] = await Promise.all([
         tx.backorder.count({
-          where: { invoiceId: backorder.invoice.id, outstanding: { gt: 0 } },
+          where: {
+            invoiceId: backorder.invoice.id,
+            cancelledAt: null,
+            outstanding: { gt: 0 },
+            invoice: { is: { type: "SALE", status: "ISSUED" } },
+          },
         }),
         tx.invoiceItem.findMany({
           where: { invoiceId: backorder.invoice.id },
@@ -196,6 +215,7 @@ export async function POST(request: NextRequest) {
       BACKORDER_ITEM_REPLACED: { message: "قلم فاکتور ویرایش شده و این کسری نیازمند بازبینی دستی است.", status: 409 },
       BACKORDER_OVER_ALLOCATION: { message: "مقدار تخصیص از کسری سفارش بیشتر است.", status: 400 },
       BACKORDER_STOCK_INSUFFICIENT: { message: "موجودی فعلی برای این تخصیص کافی نیست.", status: 409 },
+      NEGATIVE_STOCK_BACKORDER_AUTO_ALLOCATED: { message: "کسری ثبت‌شده در موجودی منفی، با ورود موجودی به‌صورت خودکار تسویه می‌شود.", status: 409 },
       STOCK_CONFLICT: { message: "موجودی هم‌زمان تغییر کرده؛ دوباره تلاش کنید.", status: 409 },
       BACKORDER_CONFLICT: { message: "کسری سفارش هم‌زمان تغییر کرده؛ دوباره تلاش کنید.", status: 409 },
     };

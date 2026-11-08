@@ -5,13 +5,14 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { currencyInputToRial, MAX_CURRENCY_RIAL } from "@/lib/currency";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 type RouteContext = {
   params: Promise<{ invoiceId: string }>;
 };
 
 const amountSchema = z.string().regex(/^\d{1,18}(\.\d)?$/);
-const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER"] as const;
+const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS"] as const;
 
 const invoiceSchema = z.object({
   type: z.enum(["PURCHASE", "SALE"]),
@@ -23,8 +24,11 @@ const invoiceSchema = z.object({
     address: z.string().trim().max(1000).nullable().optional(),
   }).nullable().optional(),
   description: z.string().trim().max(1000).nullable().optional(),
+  reference: z.string().trim().max(150).nullable().optional(),
+  referenceNumber: z.string().trim().max(100).nullable().optional(),
   extraCosts: amountSchema.default("0"),
   discount: amountSchema.default("0"),
+  discountPercent: z.string().regex(/^\d{1,3}(\.\d{1,2})?$/).nullable().optional(),
   payments: z.array(z.object({
     method: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER"]),
     amount: amountSchema,
@@ -109,6 +113,7 @@ function serializeInvoice(invoice: {
     checkNumber?: string | null;
     checkIssuedAt?: Date | null;
     checkDueAt?: Date | null;
+    checkClearedAt?: Date | null;
     payableTo?: string | null;
     destinationDetails?: string | null;
   }[];
@@ -173,6 +178,7 @@ function serializeInvoice(invoice: {
       checkNumber: string | null;
       checkIssuedAt: Date | null;
       checkDueAt: Date | null;
+      checkClearedAt: Date | null;
       payableTo: string | null;
       destinationDetails: string | null;
     }[];
@@ -189,6 +195,7 @@ function serializeInvoice(invoice: {
       amount: payment.amount.toString(),
       checkIssuedAt: payment.checkIssuedAt?.toISOString() ?? null,
       checkDueAt: payment.checkDueAt?.toISOString() ?? null,
+      checkClearedAt: payment.checkClearedAt?.toISOString() ?? null,
     })),
     purchaseReturns: invoice.purchaseReturns?.map((purchaseReturn) => ({
       ...purchaseReturn,
@@ -218,6 +225,7 @@ function serializeInvoice(invoice: {
         amount: payment.amount.toString(),
         checkIssuedAt: payment.checkIssuedAt?.toISOString() ?? null,
         checkDueAt: payment.checkDueAt?.toISOString() ?? null,
+        checkClearedAt: payment.checkClearedAt?.toISOString() ?? null,
       })),
     })),
     items: invoice.items.map((item) => ({
@@ -262,6 +270,7 @@ export async function GET(
           select: {
             method: true, amount: true, description: true, status: true,
             checkNumber: true, checkIssuedAt: true, checkDueAt: true,
+            checkClearedAt: true,
             payableTo: true, destinationDetails: true,
             allocationBatchId: true,
           },
@@ -282,6 +291,7 @@ export async function GET(
                 checkNumber: true,
                 checkIssuedAt: true,
                 checkDueAt: true,
+                checkClearedAt: true,
                 payableTo: true,
                 destinationDetails: true,
               },
@@ -350,12 +360,14 @@ export async function GET(
             checkNumber: string | null;
             checkIssuedAt: Date | null;
             checkDueAt: Date | null;
+            checkClearedAt: Date | null;
             payableTo: string | null;
             destinationDetails: string | null;
           }[]>`
             SELECT payment."salesReturnId", payment."method", payment."amount",
               payment."description", payment."checkNumber", payment."checkIssuedAt",
-              payment."checkDueAt", payment."payableTo", payment."destinationDetails"
+              payment."checkDueAt", payment."checkClearedAt",
+              payment."payableTo", payment."destinationDetails"
             FROM "Payment" payment
             WHERE payment."businessId" = ${auth.businessId}
               AND payment."salesReturnId" IN (${Prisma.join(salesReturnIds)})
@@ -449,6 +461,7 @@ export async function PATCH(
               checkNumber: true,
               checkIssuedAt: true,
               checkDueAt: true,
+              checkClearedAt: true,
               payableTo: true,
               destinationDetails: true,
             },
@@ -492,18 +505,12 @@ export async function PATCH(
         }
       }
       if (
-        data.payments.length !== expectedPaymentMethods.length ||
-        new Set(data.payments.map((payment) => payment.method)).size !== expectedPaymentMethods.length ||
+        data.payments.length < expectedPaymentMethods.length ||
+        data.payments.length > expectedPaymentMethods.length + 1 ||
+        new Set(data.payments.map((payment) => payment.method)).size !== data.payments.length ||
         !expectedPaymentMethods.every((method) => data.payments.some((payment) => payment.method === method))
       ) {
         throw new Error("PAYMENT_METHODS_REQUIRED");
-      }
-      if (data.payments.some((payment) =>
-        payment.method === "CHECK" &&
-        /[1-9]/.test(payment.amount.replace(".", "")) &&
-        (!payment.checkNumber || !payment.checkIssuedAt || !payment.checkDueAt || !payment.payableTo)
-      )) {
-        throw new Error("CHECK_DETAILS_REQUIRED");
       }
       if (data.payments.some((payment) =>
         payment.checkIssuedAt &&
@@ -568,8 +575,6 @@ export async function PATCH(
 
       const extraCosts = currencyInputToRial(data.extraCosts, business.currencyUnit);
 
-      const discount = currencyInputToRial(data.discount, business.currencyUnit);
-
       const items = data.items.map((item) => {
         const quantity = new Prisma.Decimal(item.quantity);
 
@@ -605,26 +610,49 @@ export async function PATCH(
         throw new Error("AMOUNT_OVERFLOW");
       }
 
-      if (discount > subtotal + extraCosts) {
+      const discountPercent = data.discountPercent === undefined || data.discountPercent === null
+        ? null
+        : new Prisma.Decimal(data.discountPercent);
+      if (discountPercent && (discountPercent.lessThan(0) || discountPercent.greaterThan(100))) {
+        throw new Error("INVALID_DISCOUNT_PERCENT");
+      }
+      const discountBase = subtotal;
+      const discount = discountPercent
+        ? BigInt(new Prisma.Decimal(discountBase.toString())
+            .mul(discountPercent)
+            .div(100)
+            .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+            .toFixed(0))
+        : currencyInputToRial(data.discount, business.currencyUnit);
+      if (discount > discountBase) {
         throw new Error("INVALID_DISCOUNT");
       }
 
       const total = subtotal + extraCosts - discount;
       const requestedPaymentTotal = data.payments.reduce(
-        (sum, payment) =>
-          sum + currencyInputToRial(payment.amount, business.currencyUnit),
+        (sum, payment) => payment.method === "LEDGER"
+          ? sum
+          : sum + currencyInputToRial(payment.amount, business.currencyUnit),
         0n,
       );
-      if (requestedPaymentTotal !== total) {
-        throw new Error(
-          requestedPaymentTotal < total
-            ? "PAYMENTS_UNDER_TOTAL"
-            : "PAYMENTS_OVER_TOTAL",
-        );
+      if (requestedPaymentTotal > total) {
+        throw new Error("PAYMENTS_OVER_TOTAL");
+      }
+      const ledgerAmount = total - requestedPaymentTotal;
+      const immediatelyPaidTotal = data.payments.reduce(
+        (sum, payment) => payment.method === "LEDGER" || payment.method === "CHECK"
+          ? sum
+          : sum + currencyInputToRial(payment.amount, business.currencyUnit),
+        0n,
+      );
+      if (data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
+        throw new Error("CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT");
       }
       if (editingIssuedInvoice) {
         const confirmedAmount = existing.payments.reduce(
-          (sum, payment) => payment.status === "CONFIRMED" && payment.method !== "LEDGER"
+          (sum, payment) => payment.status === "CONFIRMED" &&
+            payment.method !== "LEDGER" &&
+            (payment.method !== "CHECK" || payment.checkClearedAt !== null)
             ? sum + payment.amount
             : sum,
           0n,
@@ -634,6 +662,9 @@ export async function PATCH(
         }
         if (existing.payments.some((payment) => payment.status !== "CONFIRMED")) {
           throw new Error("INVOICE_PAYMENT_STATE_UNSAFE");
+        }
+        if (existing.payments.some((payment) => payment.checkClearedAt !== null)) {
+          throw new Error("INVOICE_CLEARED_CHECKS_PRESENT");
         }
         if (existing.payments.length > 0) {
           const currentBatchId = existing.payments[0].allocationBatchId;
@@ -661,6 +692,7 @@ export async function PATCH(
           checkNumber: payment.checkNumber,
           checkIssuedAt: payment.checkIssuedAt?.toISOString() ?? null,
           checkDueAt: payment.checkDueAt?.toISOString() ?? null,
+          checkClearedAt: payment.checkClearedAt?.toISOString() ?? null,
           payableTo: payment.payableTo,
           destinationDetails: payment.destinationDetails,
         }));
@@ -687,7 +719,9 @@ export async function PATCH(
         }
         const after = [];
         for (const payment of data.payments) {
-          const amount = currencyInputToRial(payment.amount, business.currencyUnit);
+          const amount = payment.method === "LEDGER"
+            ? ledgerAmount
+            : currencyInputToRial(payment.amount, business.currencyUnit);
           if (amount === 0n) continue;
           const created = await tx.payment.create({
             data: {
@@ -1014,6 +1048,9 @@ export async function PATCH(
             subtotal,
             extraCosts,
             discount,
+            discountPercent,
+            reference: existing.type === "SALE" ? data.reference || null : null,
+            referenceNumber: existing.type === "SALE" ? data.referenceNumber || null : null,
             total,
           },
           include: {
@@ -1127,6 +1164,9 @@ export async function PATCH(
           });
           if (!product) throw new Error("PRODUCT_NOT_FOUND");
           const newStock = product.stock.sub(delta);
+          if (delta.greaterThan(0) && newStock.lessThan(0)) {
+            throw new Error("INSUFFICIENT_STOCK_TO_EDIT_SALE");
+          }
           let valueDelta: bigint;
           if (delta.greaterThan(0)) {
             const calculatedValue = BigInt(product.averageCost.mul(delta).toFixed(0, Prisma.Decimal.ROUND_HALF_UP));
@@ -1163,7 +1203,12 @@ export async function PATCH(
           }
           const newInventoryValue = delta.greaterThan(0)
             ? (product.inventoryValue > valueDelta ? product.inventoryValue - valueDelta : 0n)
-            : newStock.greaterThan(0) ? product.inventoryValue + valueDelta : 0n;
+            : addInventoryStock(
+                product.stock,
+                product.inventoryValue,
+                delta.abs(),
+                valueDelta,
+              ).inventoryValue;
           if (newInventoryValue > MAX_CURRENCY_RIAL || newInventoryValue < 0n) {
             throw new Error("AMOUNT_OVERFLOW");
           }
@@ -1181,7 +1226,7 @@ export async function PATCH(
             },
           });
           if (updated.count !== 1) throw new Error("STOCK_CONFLICT");
-          await tx.inventoryMovement.create({
+          const movement = await tx.inventoryMovement.create({
             data: {
               businessId, productId, invoiceId: existing.id,
               type: delta.greaterThan(0) ? "SALE" : "RETURN_IN",
@@ -1191,6 +1236,7 @@ export async function PATCH(
               description: `اصلاح اقلام فاکتور صادرشده ${invoiceId}`,
             },
           });
+          await reconcileNegativeStockBackorders(tx, movement);
         }
 
         const paymentRevision = await replaceIssuedAllocations();
@@ -1271,7 +1317,10 @@ export async function PATCH(
               ? new Date(`${data.invoiceDate}T00:00:00.000Z`)
               : existing.invoiceDate,
             description: data.description || null,
-            subtotal, extraCosts, discount, total,
+            subtotal, extraCosts, discount, discountPercent,
+            reference: existing.type === "SALE" ? data.reference || null : null,
+            referenceNumber: existing.type === "SALE" ? data.referenceNumber || null : null,
+            total,
           },
           include: {
             contact: { select: { id: true, name: true } },
@@ -1299,18 +1348,27 @@ export async function PATCH(
           subtotal,
           extraCosts,
           discount,
+          discountPercent,
+          reference: data.type === "SALE" ? data.reference || null : null,
+          referenceNumber: data.type === "SALE" ? data.referenceNumber || null : null,
           total,
           items: {
             deleteMany: {},
             create: items,
           },
           payments: {
-            create: data.payments.filter((payment) => currencyInputToRial(payment.amount, business.currencyUnit) > 0n).map((payment) => ({
+            create: data.payments.filter((payment) =>
+              payment.method === "LEDGER"
+                ? ledgerAmount > 0n
+                : currencyInputToRial(payment.amount, business.currencyUnit) > 0n
+            ).map((payment) => ({
               businessId,
               contactId: data.contactId || null,
               type: data.type === "SALE" ? "RECEIPT" : "PAYMENT",
               method: payment.method,
-              amount: currencyInputToRial(payment.amount, business.currencyUnit),
+              amount: payment.method === "LEDGER"
+                ? ledgerAmount
+                : currencyInputToRial(payment.amount, business.currencyUnit),
               status: "PENDING",
               description: payment.description || null,
               trackingNumber: payment.checkNumber || null,
@@ -1379,11 +1437,7 @@ export async function PATCH(
           status: 400,
         },
         PAYMENT_METHODS_REQUIRED: {
-          message: "هر پنج روش پرداخت باید با مبلغ مشخص (حتی صفر) ارسال شوند.",
-          status: 400,
-        },
-        CHECK_DETAILS_REQUIRED: {
-          message: "برای چک، شماره، تاریخ صدور، سررسید و در وجه را تکمیل کنید.",
+          message: "چهار روش پرداخت واقعی باید با مبلغ مشخص ارسال شوند و روش حساب دفتری اختیاری است.",
           status: 400,
         },
         CHECK_DUE_BEFORE_ISSUE: {
@@ -1396,6 +1450,10 @@ export async function PATCH(
         },
         INVOICE_PAYMENT_STATE_UNSAFE: {
           message: "وضعیت پرداخت‌های فاکتور برای ویرایش تخصیص‌ها امن نیست.",
+          status: 409,
+        },
+        INVOICE_CLEARED_CHECKS_PRESENT: {
+          message: "فاکتور چک پاس‌شده دارد؛ برای حفظ سابقه مالی، ویرایش تخصیص پرداخت آن مجاز نیست.",
           status: 409,
         },
         PAYMENT_PLAN_CONFLICT: {
@@ -1413,6 +1471,10 @@ export async function PATCH(
         AMOUNT_OVERFLOW: {
           message: "مبلغ فاکتور از محدوده مجاز سامانه بیشتر است.",
           status: 400,
+        },
+        INSUFFICIENT_STOCK_TO_EDIT_SALE: {
+          message: "موجودی برای افزایش مقدار فروش فاکتور صادرشده کافی نیست؛ ثبت موجودی منفی فقط هنگام صدور فاکتور فروش و با تأیید انجام می‌شود.",
+          status: 409,
         },
         BACKORDER_EDIT_LOCKED: {
           message: "مقدار کالای دارای کسری سفارش را نمی‌توان پس از تخصیص تغییر داد؛ برای اصلاح سوابق، ابتدا کسری را تعیین تکلیف کنید.",
@@ -1434,6 +1496,10 @@ export async function PATCH(
           message: "مشتری را انتخاب یا اطلاعات مشتری موقت را وارد کنید.",
           status: 400,
         },
+        CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT: {
+          message: "برای ثبت بدهی یا چک تسویه‌نشده، مشتری دارای حساب را انتخاب کنید.",
+          status: 400,
+        },
         INVALID_QUANTITY: {
           message: "تعداد کالا باید بیشتر از صفر باشد.",
           status: 400,
@@ -1444,6 +1510,10 @@ export async function PATCH(
         },
         INVALID_DISCOUNT: {
           message: "تخفیف نمی‌تواند از مجموع مبلغ فاکتور بیشتر باشد.",
+          status: 400,
+        },
+        INVALID_DISCOUNT_PERCENT: {
+          message: "درصد تخفیف باید بین صفر تا صد باشد.",
           status: 400,
         },
       };

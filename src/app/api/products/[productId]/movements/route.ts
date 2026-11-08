@@ -3,7 +3,8 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { toRial } from "@/lib/currency";
+import { MAX_CURRENCY_RIAL, toRial } from "@/lib/currency";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 const movementSchema = z.object({
   type: z.enum(["ADJUSTMENT_IN", "ADJUSTMENT_OUT"]),
@@ -199,8 +200,7 @@ export async function POST(
         const newStock = isIncoming
           ? product.stock.add(quantity)
           : product.stock.sub(quantity);
-
-        if (newStock.lessThan(0)) {
+        if (!isIncoming && newStock.lessThan(0)) {
           throw new Error("INSUFFICIENT_STOCK");
         }
 
@@ -214,11 +214,14 @@ export async function POST(
             .toFixed(0, Prisma.Decimal.ROUND_HALF_UP);
 
           totalCost = BigInt(incomingCost);
-          newInventoryValue = product.inventoryValue + totalCost;
-
-          newAverageCost = new Prisma.Decimal(
-            newInventoryValue.toString()
-          ).div(newStock);
+          const inventory = addInventoryStock(
+            product.stock,
+            product.inventoryValue,
+            quantity,
+            totalCost,
+          );
+          newInventoryValue = inventory.inventoryValue;
+          newAverageCost = inventory.averageCost;
         } else {
           totalCost = quantity.equals(product.stock)
             ? product.inventoryValue
@@ -231,12 +234,14 @@ export async function POST(
           if (totalCost > product.inventoryValue) {
             totalCost = product.inventoryValue;
           }
-
           newInventoryValue = product.inventoryValue - totalCost;
 
-          newAverageCost = newStock.isZero()
-            ? new Prisma.Decimal(0)
-            : product.averageCost;
+          newAverageCost = newStock.greaterThan(0)
+            ? product.averageCost
+            : new Prisma.Decimal(0);
+        }
+        if (newInventoryValue < 0n || newInventoryValue > MAX_CURRENCY_RIAL) {
+          throw new Error("INVENTORY_VALUE_OVERFLOW");
         }
 
         const updated = await tx.product.updateMany({
@@ -270,6 +275,7 @@ export async function POST(
             description: data.description || null,
           },
         });
+        await reconcileNegativeStockBackorders(tx, movement);
 
         return {
           stock: newStock.toString(),
@@ -301,13 +307,17 @@ export async function POST(
           message: "برای کالای آرشیوشده نمی‌توان گردش جدید ثبت کرد.",
           status: 400,
         },
-        INSUFFICIENT_STOCK: {
-          message: "موجودی کافی نیست و خروج باعث منفی شدن موجودی می‌شود.",
-          status: 409,
-        },
         STOCK_CONFLICT: {
           message: "موجودی هم‌زمان تغییر کرده است. دوباره تلاش کنید.",
           status: 409,
+        },
+        INSUFFICIENT_STOCK: {
+          message: "موجودی برای ثبت این خروج کافی نیست.",
+          status: 409,
+        },
+        INVENTORY_VALUE_OVERFLOW: {
+          message: "ارزش موجودی از محدوده مجاز سامانه خارج است.",
+          status: 400,
         },
       };
 

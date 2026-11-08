@@ -25,6 +25,7 @@ const paymentSchema = z.object({
   checkNumber: z.string().trim().max(100).optional().nullable(),
   checkIssuedAt: z.string().date().optional().nullable(),
   checkDueAt: z.string().date().optional().nullable(),
+  checkClearedAt: z.string().date().optional().nullable(),
   payableTo: z.string().trim().max(150).optional().nullable(),
   destinationDetails: z.string().trim().max(300).optional().nullable(),
   description: z.string().trim().max(1000).optional().nullable(),
@@ -44,6 +45,7 @@ function serializePayment(payment: {
   checkNumber?: string | null;
   checkIssuedAt?: Date | null;
   checkDueAt?: Date | null;
+  checkClearedAt?: Date | null;
   payableTo?: string | null;
   destinationDetails?: string | null;
   description: string | null;
@@ -66,6 +68,7 @@ function serializePayment(payment: {
     amount: payment.amount.toString(),
     checkIssuedAt: payment.checkIssuedAt?.toISOString() ?? null,
     checkDueAt: payment.checkDueAt?.toISOString() ?? null,
+    checkClearedAt: payment.checkClearedAt?.toISOString() ?? null,
     paidAt: payment.paidAt.toISOString(),
     createdAt: payment.createdAt.toISOString(),
     updatedAt: payment.updatedAt.toISOString(),
@@ -176,9 +179,9 @@ export async function GET(request: NextRequest) {
       }),
       prisma.payment.count({ where }),
       prisma.payment.groupBy({
-        by: ["type", "status"] as const,
+        by: ["type", "status", "method", "checkClearedAt"] as const,
         where,
-        orderBy: [{ type: "asc" }, { status: "asc" }],
+        orderBy: [{ type: "asc" }, { status: "asc" }, { method: "asc" }],
         _sum: { amount: true },
         _count: { _all: true },
       }),
@@ -192,6 +195,9 @@ export async function GET(request: NextRequest) {
             ? group._count._all ?? 0
             : 0;
         result.confirmedCount += count;
+        if (group.method === PaymentMethod.CHECK && group.checkClearedAt === null) {
+          return result;
+        }
         if (group.type === PaymentType.RECEIPT) {
           result.receipts += group._sum?.amount ?? 0n;
         } else {
@@ -252,18 +258,19 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
-    if (
-      data.method === PaymentMethod.CHECK &&
-      (!data.checkNumber || !data.checkIssuedAt || !data.checkDueAt || !data.payableTo)
-    ) {
-      return NextResponse.json(
-        { error: "برای پرداخت با چک، شماره، تاریخ صدور، سررسید و در وجه الزامی است." },
-        { status: 400 },
-      );
-    }
     if (data.checkIssuedAt && data.checkDueAt && data.checkDueAt < data.checkIssuedAt) {
       return NextResponse.json(
         { error: "تاریخ سررسید چک نمی‌تواند قبل از تاریخ صدور باشد." },
+        { status: 400 },
+      );
+    }
+    if (
+      data.checkClearedAt &&
+      (data.method !== PaymentMethod.CHECK ||
+        (data.checkIssuedAt && data.checkClearedAt < data.checkIssuedAt))
+    ) {
+      return NextResponse.json(
+        { error: "تاریخ پاس‌شدن باید برای چک و پس از تاریخ صدور آن باشد." },
         { status: 400 },
       );
     }
@@ -298,9 +305,11 @@ export async function POST(request: NextRequest) {
           where: { id: data.invoiceId, businessId },
           include: {
             contact: { select: { id: true } },
+            salesReturns: { select: { total: true } },
+            purchaseReturns: { select: { total: true } },
             payments: {
               where: { status: PaymentStatus.CONFIRMED },
-              select: { amount: true, method: true },
+                select: { amount: true, method: true, checkClearedAt: true },
             },
           },
         });
@@ -331,12 +340,18 @@ export async function POST(request: NextRequest) {
         }
 
         const alreadyPaid = invoice.payments.reduce(
-          (sum, item) =>
-            item.method === PaymentMethod.LEDGER ? sum : sum + item.amount,
+          (sum, item) => item.method === PaymentMethod.LEDGER ||
+            (item.method === PaymentMethod.CHECK && item.checkClearedAt === null)
+            ? sum
+            : sum + item.amount,
           BigInt(0),
         );
 
-        if (alreadyPaid + amount > invoice.total) {
+        const returnedAmount = [
+          ...invoice.salesReturns,
+          ...invoice.purchaseReturns,
+        ].reduce((sum, item) => sum + item.total, 0n);
+        if (alreadyPaid + amount + returnedAmount > invoice.total) {
           throw new Error("OVERPAYMENT");
         }
       }
@@ -369,6 +384,9 @@ export async function POST(request: NextRequest) {
             : null,
           checkDueAt: data.method === PaymentMethod.CHECK && data.checkDueAt
             ? new Date(`${data.checkDueAt}T00:00:00.000Z`)
+            : null,
+          checkClearedAt: data.method === PaymentMethod.CHECK && data.checkClearedAt
+            ? new Date(`${data.checkClearedAt}T00:00:00.000Z`)
             : null,
           payableTo: data.method === PaymentMethod.CHECK ? data.payableTo || null : null,
           destinationDetails:

@@ -5,9 +5,10 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { currencyInputToRial, MAX_CURRENCY_RIAL } from "@/lib/currency";
 import { prisma } from "@/lib/prisma";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 type RouteContext = { params: Promise<{ invoiceId: string }> };
-type ReturnLineInput = { invoiceItemId: string; quantity: string };
+type ReturnLineInput = { invoiceItemId: string; quantity: string; unitPrice?: string };
 type ReturnRow = {
   id: string;
   invoiceId: string;
@@ -41,7 +42,20 @@ const requestSchema = z.object({
   items: z.array(z.object({
     invoiceItemId: z.string().min(1),
     quantity: z.string().regex(/^\d{1,12}(\.\d{1,3})?$/),
-  })).min(1).max(100),
+    unitPrice: z.string().regex(/^\d{1,18}(\.\d)?$/).optional(),
+  })).min(1).max(100).superRefine((items, ctx) => {
+    const itemIds = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (itemIds.has(item.invoiceItemId)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "invoiceItemId"],
+          message: "هر قلم فاکتور فقط یک‌بار در مرجوعی درج شود.",
+        });
+      }
+      itemIds.add(item.invoiceItemId);
+    }
+  }),
   refundAmount: z.string().regex(/^\d{1,18}(\.\d)?$/).default("0"),
   refundMethod: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "BANK_TRANSFER", "POS"]).optional(),
   refundDescription: z.string().trim().max(1000).nullable().optional(),
@@ -91,7 +105,11 @@ function hashRequest(
     invoiceId,
     items: [...aggregated.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([invoiceItemId, quantity]) => [invoiceItemId, quantity.toFixed(3)]),
+      .map(([invoiceItemId, quantity]) => [
+        invoiceItemId,
+        quantity.toFixed(3),
+        items.find((item) => item.invoiceItemId === invoiceItemId)?.unitPrice ?? null,
+      ]),
     refundAmount: data.refundAmount,
     refundMethod: data.refundMethod ?? null,
     refundDescription: data.refundDescription ?? null,
@@ -206,6 +224,22 @@ export async function POST(request: Request, context: RouteContext) {
     }
     if (refundAmount < 0n || refundAmount > MAX_CURRENCY_RIAL) {
       return NextResponse.json({ message: "مبلغ بازپرداخت معتبر نیست." }, { status: 400 });
+    }
+    const requestedUnitPrices = new Map<string, bigint>();
+    for (const item of parsed.data.items) {
+      if (item.unitPrice === undefined) continue;
+      try {
+        const unitPrice = currencyInputToRial(item.unitPrice, user.business.currencyUnit);
+        if (unitPrice > MAX_CURRENCY_RIAL) {
+          return NextResponse.json({ message: "قیمت مرجوعی از محدوده مجاز سامانه بیشتر است." }, { status: 400 });
+        }
+        requestedUnitPrices.set(item.invoiceItemId, unitPrice);
+      } catch (error) {
+        if (error instanceof Error && error.message === "INVALID_CURRENCY_AMOUNT") {
+          return NextResponse.json({ message: "قیمت مرجوعی معتبر نیست." }, { status: 400 });
+        }
+        throw error;
+      }
     }
     if (refundAmount > 0n && !parsed.data.refundMethod) {
       return NextResponse.json({ message: "روش بازپرداخت را انتخاب کنید." }, { status: 400 });
@@ -353,12 +387,34 @@ export async function POST(request: Request, context: RouteContext) {
 
         const remainingAmount = original.amount - previous.amount;
         const remainingCost = original.item.costOfGoodsSold - previous.cost;
-        const amount = quantity.equals(remainingQuantity)
-          ? remainingAmount
-          : prorateAmount(remainingAmount, quantity, remainingQuantity);
-        const inventoryCost = quantity.equals(remainingQuantity)
-          ? remainingCost
-          : prorateAmount(remainingCost, quantity, remainingQuantity);
+        const remainingCostedQuantity = Prisma.Decimal.max(
+          original.item.costedQuantity.sub(
+            Prisma.Decimal.min(previous.quantity, original.item.costedQuantity),
+          ),
+          0,
+        );
+        const returnedCostedQuantity = Prisma.Decimal.min(quantity, remainingCostedQuantity);
+        const requestedUnitPrice = requestedUnitPrices.get(itemId);
+        let amount: bigint;
+        if (requestedUnitPrice === undefined) {
+          amount = quantity.equals(remainingQuantity)
+            ? remainingAmount
+            : prorateAmount(remainingAmount, quantity, remainingQuantity);
+        } else {
+          const lineAmount = BigInt(
+            quantity
+              .mul(requestedUnitPrice.toString())
+              .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+              .toFixed(0),
+          );
+          amount = lineAmount;
+          if (amount > remainingAmount) throw new Error("RETURN_AMOUNT_EXCEEDED");
+        }
+        const inventoryCost = returnedCostedQuantity.isZero()
+          ? 0n
+          : returnedCostedQuantity.equals(remainingCostedQuantity)
+            ? remainingCost
+            : prorateAmount(remainingCost, returnedCostedQuantity, remainingCostedQuantity);
         if (amount < 0n || inventoryCost < 0n || inventoryCost > MAX_CURRENCY_RIAL) {
           throw new Error("RETURN_AMOUNT_INVALID");
         }
@@ -399,14 +455,17 @@ export async function POST(request: Request, context: RouteContext) {
         `;
         const product = products[0];
         if (!product) throw new Error("RETURN_PRODUCT_NOT_FOUND");
-        const stock = product.stock.add(line.quantity);
-        const inventoryValue = product.inventoryValue + line.inventoryCost;
+        const inventory = addInventoryStock(
+          product.stock,
+          product.inventoryValue,
+          line.quantity,
+          line.inventoryCost,
+        );
+        const { stock, inventoryValue } = inventory;
         if (inventoryValue < 0n || inventoryValue > MAX_CURRENCY_RIAL) {
           throw new Error("AMOUNT_OVERFLOW");
         }
-        const averageCost = stock.greaterThan(0)
-          ? new Prisma.Decimal(inventoryValue.toString()).div(stock)
-          : new Prisma.Decimal(0);
+        const averageCost = inventory.averageCost;
         await tx.$executeRaw`
           UPDATE "Product"
           SET "stock" = ${stock}, "inventoryValue" = ${inventoryValue},
@@ -422,14 +481,25 @@ export async function POST(request: Request, context: RouteContext) {
             ${line.invoiceItemId}, ${line.productId}, ${line.quantity}, ${line.amount},
             ${line.inventoryCost})
         `;
-        await tx.$executeRaw`
+        const movementRows = await tx.$queryRaw<{
+          id: string;
+          businessId: string;
+          productId: string;
+          quantity: Prisma.Decimal;
+          totalCost: bigint;
+          type: string;
+        }[]>`
           INSERT INTO "InventoryMovement"
             ("id", "businessId", "productId", "invoiceId", "salesReturnId", "type",
              "quantity", "totalCost", "averageCost", "description")
           VALUES (${randomUUID()}, ${businessId}, ${line.productId}, ${invoiceId}, ${returnId},
             'RETURN_IN'::"MovementType", ${line.quantity}, ${line.inventoryCost}, ${averageCost},
             ${`مرجوعی فروش ${returnNumber}`})
+          RETURNING "id", "businessId", "productId", "quantity", "totalCost", "type"
         `;
+        if (movementRows[0]) {
+          await reconcileNegativeStockBackorders(tx, movementRows[0]);
+        }
         createdItems.push({
           id: itemId,
           invoiceItemId: line.invoiceItemId,
@@ -522,6 +592,7 @@ export async function POST(request: Request, context: RouteContext) {
       INVALID_RETURN_QUANTITY: { status: 400, message: "مقدار مرجوعی باید بیشتر از صفر باشد." },
       RETURN_ITEM_NOT_IN_INVOICE: { status: 400, message: "یکی از کالاها متعلق به این فاکتور نیست." },
       RETURN_QUANTITY_EXCEEDED: { status: 409, message: "مقدار مرجوعی از مقدار فروخته‌شده یا تحویل‌شده بیشتر است." },
+      RETURN_AMOUNT_EXCEEDED: { status: 409, message: "مبلغ مرجوعی از مانده مبلغ این قلم بیشتر است." },
       RETURN_PRODUCT_NOT_FOUND: { status: 404, message: "کالا پیدا نشد." },
       RETURN_AMOUNT_INVALID: { status: 409, message: "محاسبه مبلغ یا بهای تمام‌شده مرجوعی معتبر نیست." },
       REFUND_EXCEEDS_RETURN: { status: 400, message: "مبلغ بازپرداخت نمی‌تواند از مبلغ مرجوعی بیشتر باشد." },

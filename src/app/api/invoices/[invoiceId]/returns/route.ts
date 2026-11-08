@@ -10,7 +10,20 @@ const returnSchema = z.object({
   items: z.array(z.object({
     invoiceItemId: z.string().min(1),
     quantity: z.string().regex(/^\d{1,12}(\.\d{1,3})?$/),
-  })).min(1).max(100),
+    unitPrice: z.string().regex(/^\d{1,18}(\.\d)?$/).optional(),
+  })).min(1).max(100).superRefine((items, ctx) => {
+    const itemIds = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (itemIds.has(item.invoiceItemId)) {
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "invoiceItemId"],
+          message: "هر قلم فاکتور فقط یک‌بار در مرجوعی درج شود.",
+        });
+      }
+      itemIds.add(item.invoiceItemId);
+    }
+  }),
   refundAmount: z.string().regex(/^\d{1,18}(\.\d)?$/).default("0"),
   refundMethod: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "POS"]).optional(),
   refundCheckNumber: z.string().trim().max(100).nullable().optional(),
@@ -48,7 +61,7 @@ export async function POST(request: Request, context: RouteContext) {
   let requestHash: string | null = null;
   try {
     const user = await getCurrentUser();
-    if (!user || user.role !== "BUSINESS_OWNER" || !user.business?.isActive) {
+    if (!user || user.role !== "BUSINESS_OWNER" || !user.business || !user.business.isActive) {
       return NextResponse.json({ message: "دسترسی غیرمجاز است." }, { status: 401 });
     }
 
@@ -58,6 +71,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
     const { invoiceId } = await context.params;
     const businessId = user.business.id;
+    const currencyUnit = user.business.currencyUnit;
     requestBusinessId = businessId;
     requestInvoiceId = invoiceId;
     idempotencyKey = parsed.data.idempotencyKey;
@@ -78,7 +92,7 @@ export async function POST(request: Request, context: RouteContext) {
       .digest("hex");
     let refundAmount: bigint;
     try {
-      refundAmount = currencyInputToRial(parsed.data.refundAmount, user.business.currencyUnit);
+      refundAmount = currencyInputToRial(parsed.data.refundAmount, currencyUnit);
     } catch (error) {
       if (error instanceof Error && error.message === "INVALID_CURRENCY_AMOUNT") {
         return NextResponse.json({ message: "مبلغ بازپرداخت معتبر نیست." }, { status: 400 });
@@ -199,13 +213,24 @@ export async function POST(request: Request, context: RouteContext) {
         if (quantity.greaterThan(remaining)) throw new Error("RETURN_QUANTITY_EXCEEDED");
 
         const remainingAmount = original.amount - (previous?.amount ?? 0n);
-        const amount = quantity.equals(remaining)
-          ? remainingAmount
-          : prorateAmount(
-              remainingAmount,
-              BigInt(quantity.mul(1000).toFixed(0)),
-              BigInt(remaining.mul(1000).toFixed(0)),
+        const requestedUnitPrice = parsed.data.items.find(
+          (item) => item.invoiceItemId === invoiceItemId,
+        )?.unitPrice;
+        const amount = requestedUnitPrice === undefined
+          ? quantity.equals(remaining)
+            ? remainingAmount
+            : prorateAmount(
+                remainingAmount,
+                BigInt(quantity.mul(1000).toFixed(0)),
+                BigInt(remaining.mul(1000).toFixed(0)),
+              )
+          : BigInt(
+              quantity
+                .mul(currencyInputToRial(requestedUnitPrice, currencyUnit).toString())
+                .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+                .toFixed(0),
             );
+        if (amount > remainingAmount) throw new Error("RETURN_AMOUNT_EXCEEDED");
         if (amount < 0n) throw new Error("RETURN_AMOUNT_INVALID");
 
         const product = await tx.product.findFirst({
@@ -412,6 +437,7 @@ export async function POST(request: Request, context: RouteContext) {
       INVALID_RETURN_QUANTITY: { status: 400, message: "مقدار مرجوعی باید بیشتر از صفر باشد." },
       RETURN_ITEM_NOT_IN_INVOICE: { status: 400, message: "یکی از کالاها متعلق به این فاکتور نیست." },
       RETURN_QUANTITY_EXCEEDED: { status: 409, message: "مقدار مرجوعی از مقدار باقی‌مانده بیشتر است." },
+      RETURN_AMOUNT_EXCEEDED: { status: 409, message: "مبلغ مرجوعی از ارزش باقی‌مانده این قلم بیشتر است." },
       RETURN_AMOUNT_INVALID: { status: 409, message: "محاسبه مبلغ مرجوعی معتبر نیست." },
       RETURN_STOCK_INSUFFICIENT: { status: 409, message: "موجودی فعلی برای ثبت این مرجوعی کافی نیست." },
       STOCK_CONFLICT: { status: 409, message: "موجودی هم‌زمان تغییر کرده است؛ دوباره تلاش کنید." },

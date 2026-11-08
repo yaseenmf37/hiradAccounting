@@ -9,6 +9,7 @@ import {
   getCursorPage,
   parseCursorPageParams,
 } from "@/lib/cursor-pagination";
+import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 const amountSchema = z.string().regex(/^\d{1,18}(\.\d)?$/);
 
@@ -22,8 +23,11 @@ const invoiceSchema = z.object({
     address: z.string().trim().max(1000).nullable().optional(),
   }).nullable().optional(),
   description: z.string().trim().max(1000).nullable().optional(),
+  reference: z.string().trim().max(150).nullable().optional(),
+  referenceNumber: z.string().trim().max(100).nullable().optional(),
   extraCosts: amountSchema.default("0"),
   discount: amountSchema.default("0"),
+  discountPercent: z.string().regex(/^\d{1,3}(\.\d{1,2})?$/).nullable().optional(),
   payments: z.array(z.object({
     method: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER"]),
     amount: amountSchema,
@@ -42,7 +46,7 @@ const invoiceSchema = z.object({
     })
   ).min(1).max(100),
 });
-const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER"] as const;
+const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS"] as const;
 
 function allocateAmount(amount: bigint, weights: bigint[]) {
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
@@ -90,6 +94,9 @@ function serializeInvoice(invoice: {
   subtotal: bigint;
   extraCosts: bigint;
   discount: bigint;
+  discountPercent: Prisma.Decimal | null;
+  reference: string | null;
+  referenceNumber: string | null;
   total: bigint;
   description: string | null;
   issuedAt: Date | null;
@@ -113,6 +120,7 @@ function serializeInvoice(invoice: {
     subtotal: invoice.subtotal.toString(),
     extraCosts: invoice.extraCosts.toString(),
     discount: invoice.discount.toString(),
+    discountPercent: invoice.discountPercent?.toString() ?? null,
     total: invoice.total.toString(),
     items: invoice.items.map((item) => ({
       ...item,
@@ -136,6 +144,7 @@ export async function GET(request: NextRequest) {
     const params = request.nextUrl.searchParams;
     const type = params.get("type");
     const status = params.get("status");
+    const settlement = params.get("settlement") ?? "all";
     const search = params.get("search")?.trim();
     const startDate = params.get("startDate");
     const endDate = params.get("endDate");
@@ -156,7 +165,8 @@ export async function GET(request: NextRequest) {
     if (
       !isValidDate(startDate) ||
       !isValidDate(endDate) ||
-      (startDate && endDate && startDate > endDate)
+      (startDate && endDate && startDate > endDate) ||
+      !["all", "settled", "outstanding"].includes(settlement)
     ) {
       return NextResponse.json(
         { message: "بازه تاریخی فاکتور معتبر نیست." },
@@ -174,6 +184,8 @@ export async function GET(request: NextRequest) {
           ? {
               OR: [
                 { invoiceNumber: { contains: search, mode: "insensitive" } },
+                { reference: { contains: search, mode: "insensitive" } },
+                { referenceNumber: { contains: search, mode: "insensitive" } },
                 { contact: { name: { contains: search, mode: "insensitive" } } },
                 { contactNameSnapshot: { contains: search, mode: "insensitive" } },
               ],
@@ -197,6 +209,122 @@ export async function GET(request: NextRequest) {
             }
           : {}),
       };
+
+    if (settlement !== "all") {
+      const filters: Prisma.Sql[] = [Prisma.sql`i."businessId" = ${auth.businessId}`];
+      if (type === "PURCHASE" || type === "SALE") {
+        filters.push(Prisma.sql`i."type" = ${type}::"InvoiceType"`);
+      }
+      if (status === "DRAFT" || status === "ISSUED" || status === "CANCELLED") {
+        filters.push(Prisma.sql`i."status" = ${status}::"InvoiceStatus"`);
+      }
+      if (search) {
+        const searchPattern = `%${search}%`;
+        filters.push(Prisma.sql`(
+          i."invoiceNumber" ILIKE ${searchPattern}
+          OR COALESCE(c."name", i."contactNameSnapshot", '') ILIKE ${searchPattern}
+          OR COALESCE(i."reference", '') ILIKE ${searchPattern}
+          OR COALESCE(i."referenceNumber", '') ILIKE ${searchPattern}
+        )`);
+      }
+      if (startDate) {
+        filters.push(Prisma.sql`i."invoiceDate" >= ${new Date(`${startDate}T00:00:00.000Z`)}`);
+      }
+      if (endDate) {
+        filters.push(Prisma.sql`i."invoiceDate" < ${new Date(
+          new Date(`${endDate}T00:00:00.000Z`).getTime() + 86400000,
+        )}`);
+      }
+      const invoiceFilter = Prisma.join(filters, " AND ");
+      const dueFilter = settlement === "settled"
+        ? Prisma.sql`balance."amount" <= 0`
+        : Prisma.sql`balance."amount" > 0`;
+      const cursorFilter = pagination.cursor
+        ? Prisma.sql`(i."invoiceDate", i."id") < (
+            SELECT cursor_invoice."invoiceDate", cursor_invoice."id"
+            FROM "Invoice" cursor_invoice
+            WHERE cursor_invoice."id" = ${pagination.cursor}
+              AND cursor_invoice."businessId" = ${auth.businessId}
+          )`
+        : Prisma.sql`TRUE`;
+      const balanceCtes = Prisma.sql`
+        WITH paid AS (
+          SELECT
+            p."invoiceId",
+            SUM(p."amount") FILTER (
+              WHERE p."status" = 'CONFIRMED'
+                AND p."method" <> 'LEDGER'
+                AND (p."method" <> 'CHECK' OR p."checkClearedAt" IS NOT NULL)
+            ) AS amount
+          FROM "Payment" p
+          WHERE p."businessId" = ${auth.businessId}
+            AND p."invoiceId" IS NOT NULL
+          GROUP BY p."invoiceId"
+        ),
+        returns AS (
+          SELECT "invoiceId", SUM(amount) AS amount
+          FROM (
+            SELECT "invoiceId", "total" AS amount
+            FROM "SalesReturn"
+            WHERE "businessId" = ${auth.businessId}
+            UNION ALL
+            SELECT "invoiceId", "total" AS amount
+            FROM "PurchaseReturn"
+            WHERE "businessId" = ${auth.businessId}
+          ) return_rows
+          GROUP BY "invoiceId"
+        ),
+        invoice_balances AS (
+          SELECT
+            i."id",
+            i."invoiceDate",
+            i."total" - COALESCE(paid.amount, 0) - COALESCE(returns.amount, 0) AS amount
+          FROM "Invoice" i
+          LEFT JOIN paid ON paid."invoiceId" = i."id"
+          LEFT JOIN returns ON returns."invoiceId" = i."id"
+          LEFT JOIN "Contact" c ON c."id" = i."contactId" AND c."businessId" = i."businessId"
+          WHERE ${invoiceFilter}
+        )
+      `;
+      const [filteredRows, countRows] = await prisma.$transaction([
+        prisma.$queryRaw<{ id: string }[]>`
+          ${balanceCtes}
+          SELECT i."id"
+          FROM invoice_balances balance
+          JOIN "Invoice" i ON i."id" = balance."id"
+          WHERE ${dueFilter}
+            AND ${cursorFilter}
+          ORDER BY balance."invoiceDate" DESC, balance."id" DESC
+          LIMIT ${pagination.limit + 1}
+        `,
+        prisma.$queryRaw<{ total: bigint }[]>`
+          ${balanceCtes}
+          SELECT COUNT(*) AS total
+          FROM invoice_balances balance
+          WHERE ${dueFilter}
+        `,
+      ]);
+      const hasMore = filteredRows.length > pagination.limit;
+      const pageIds = filteredRows.slice(0, pagination.limit).map((row) => row.id);
+      const pageRows = pageIds.length
+        ? await prisma.invoice.findMany({
+            where: { id: { in: pageIds }, businessId: auth.businessId },
+            include: {
+              contact: { select: { id: true, name: true } },
+              items: { include: { product: { select: { name: true, unit: true } } } },
+            },
+          })
+        : [];
+      const invoicesById = new Map(pageRows.map((invoice) => [invoice.id, invoice]));
+      return NextResponse.json({
+        invoices: pageIds.flatMap((id) => {
+          const invoice = invoicesById.get(id);
+          return invoice ? [serializeInvoice(invoice)] : [];
+        }),
+        total: Number(countRows[0]?.total ?? 0n),
+        nextCursor: hasMore ? pageIds.at(-1) ?? null : null,
+      });
+    }
 
     const [rows, total] = await prisma.$transaction([
       prisma.invoice.findMany({
@@ -256,18 +384,12 @@ export async function POST(request: NextRequest) {
 
     const data = validation.data;
     if (
-      data.payments.length !== expectedPaymentMethods.length ||
-      new Set(data.payments.map((payment) => payment.method)).size !== expectedPaymentMethods.length ||
+      data.payments.length < expectedPaymentMethods.length ||
+      data.payments.length > expectedPaymentMethods.length + 1 ||
+      new Set(data.payments.map((payment) => payment.method)).size !== data.payments.length ||
       !expectedPaymentMethods.every((method) => data.payments.some((payment) => payment.method === method))
     ) {
-      return NextResponse.json({ message: "هر پنج روش پرداخت باید با مبلغ مشخص (حتی صفر) ارسال شوند." }, { status: 400 });
-    }
-    if (data.payments.some((payment) =>
-      payment.method === "CHECK" &&
-      /[1-9]/.test(payment.amount.replace(".", "")) &&
-      (!payment.checkNumber || !payment.checkIssuedAt || !payment.checkDueAt || !payment.payableTo)
-    )) {
-      return NextResponse.json({ message: "برای چک، شماره، تاریخ صدور، سررسید و در وجه را تکمیل کنید." }, { status: 400 });
+      return NextResponse.json({ message: "چهار روش پرداخت واقعی باید با مبلغ مشخص ارسال شوند و روش حساب دفتری اختیاری است." }, { status: 400 });
     }
     const businessId = auth.businessId;
 
@@ -329,7 +451,12 @@ export async function POST(request: NextRequest) {
     }
 
     const extraCosts = currencyInputToRial(data.extraCosts, business.currencyUnit);
-    const discount = currencyInputToRial(data.discount, business.currencyUnit);
+    const discountPercent = data.discountPercent === undefined || data.discountPercent === null
+      ? null
+      : new Prisma.Decimal(data.discountPercent);
+    if (discountPercent && (discountPercent.lessThan(0) || discountPercent.greaterThan(100))) {
+      return NextResponse.json({ message: "درصد تخفیف باید بین صفر تا صد باشد." }, { status: 400 });
+    }
 
     const items = data.items.map((item) => {
       const quantity = new Prisma.Decimal(item.quantity);
@@ -368,7 +495,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (discount > subtotal + extraCosts) {
+    const discountBase = subtotal;
+    const discount = discountPercent
+      ? BigInt(new Prisma.Decimal(discountBase.toString())
+          .mul(discountPercent)
+          .div(100)
+          .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+          .toFixed(0))
+      : currencyInputToRial(data.discount, business.currencyUnit);
+
+    if (discount > discountBase) {
       return NextResponse.json(
         { message: "تخفیف نمی‌تواند از مجموع مبلغ فاکتور بیشتر باشد." },
         { status: 400 }
@@ -377,13 +513,28 @@ export async function POST(request: NextRequest) {
 
     const total = subtotal + extraCosts - discount;
     const paymentTotal = data.payments.reduce(
-      (sum, payment) => sum + currencyInputToRial(payment.amount, business.currencyUnit),
+      (sum, payment) => payment.method === "LEDGER"
+        ? sum
+        : sum + currencyInputToRial(payment.amount, business.currencyUnit),
       0n,
     );
 
-    if (paymentTotal !== total) {
+    if (paymentTotal > total) {
       return NextResponse.json(
-        { message: paymentTotal < total ? "مجموع روش‌های پرداخت کمتر از مبلغ فاکتور است." : "مجموع روش‌های پرداخت بیشتر از مبلغ فاکتور است." },
+        { message: "مجموع پرداخت‌های واقعی نمی‌تواند از مبلغ فاکتور بیشتر باشد." },
+        { status: 400 },
+      );
+    }
+    const ledgerAmount = total - paymentTotal;
+    const immediatelyPaidTotal = data.payments.reduce(
+      (sum, payment) => payment.method === "LEDGER" || payment.method === "CHECK"
+        ? sum
+        : sum + currencyInputToRial(payment.amount, business.currencyUnit),
+      0n,
+    );
+    if (data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
+      return NextResponse.json(
+        { message: "برای ثبت بدهی یا چک تسویه‌نشده، مشتری دارای حساب را انتخاب کنید." },
         { status: 400 },
       );
     }
@@ -395,12 +546,17 @@ export async function POST(request: NextRequest) {
         })
       : data.contactSnapshot;
 
-    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = data.type === "SALE" ? "S" : "P";
-    const invoiceNumber = `${prefix}-${datePart}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
-
     const allocationBatchId = crypto.randomUUID();
     const invoice = await prisma.$transaction(async (tx) => {
+      const sequence = await tx.$queryRaw<{ invoiceNumber: bigint }[]>`
+        UPDATE "Business"
+        SET "nextInvoiceNumber" = "nextInvoiceNumber" + 1
+        WHERE "id" = ${businessId}
+          AND "nextInvoiceNumber" < ${MAX_CURRENCY_RIAL}
+        RETURNING "nextInvoiceNumber" - 1 AS "invoiceNumber"
+      `;
+      if (!sequence[0]) throw new Error("INVOICE_NUMBER_OVERFLOW");
+      const invoiceNumber = String(sequence[0].invoiceNumber);
       const created = await tx.invoice.create({
         data: {
         businessId,
@@ -418,18 +574,27 @@ export async function POST(request: NextRequest) {
         subtotal,
         extraCosts,
         discount,
+        discountPercent,
+        reference: data.type === "SALE" ? data.reference || null : null,
+        referenceNumber: data.type === "SALE" ? data.referenceNumber || null : null,
         total,
         description: data.description || null,
         items: {
           create: items,
         },
         payments: {
-          create: data.payments.filter((payment) => currencyInputToRial(payment.amount, business.currencyUnit) > 0n).map((payment) => ({
+          create: data.payments.filter((payment) =>
+            payment.method === "LEDGER"
+              ? ledgerAmount > 0n
+              : currencyInputToRial(payment.amount, business.currencyUnit) > 0n
+          ).map((payment) => ({
             businessId,
             contactId: data.contactId || null,
             type: data.type === "SALE" ? "RECEIPT" : "PAYMENT",
             method: payment.method,
-            amount: currencyInputToRial(payment.amount, business.currencyUnit),
+            amount: payment.method === "LEDGER"
+              ? ledgerAmount
+              : currencyInputToRial(payment.amount, business.currencyUnit),
             status: "PENDING",
             allocationBatchId,
             description: payment.description || null,
@@ -453,8 +618,26 @@ export async function POST(request: NextRequest) {
       });
 
       if (data.type === "PURCHASE") {
-        const acquisitionCost = subtotal + extraCosts - discount;
-        const itemCosts = allocateAmount(acquisitionCost, created.items.map((item) => item.total));
+        const acquisitionCost = subtotal - discount;
+        const discountAllocations = allocateAmount(
+          discount,
+          created.items.map((item) =>
+            BigInt(
+              item.quantity
+                .mul(1000)
+                .toDecimalPlaces(0)
+                .toFixed(0)
+            )
+          )
+        );
+
+        const itemCosts = created.items.map(
+          (item, index) => item.total - discountAllocations[index]
+        );
+
+        if (itemCosts.some((cost) => cost < 0n)) {
+          throw new Error("DISCOUNT_EXCEEDS_ITEM_TOTAL");
+        }
         const costsByItemId = new Map(
           created.items.map((item, index) => [item.id, itemCosts[index]]),
         );
@@ -480,20 +663,13 @@ export async function POST(request: NextRequest) {
             (sum, item) => sum + (costsByItemId.get(item.id) ?? 0n),
             0n,
           );
-          const newStock = product.stock.add(quantity);
-          let newInventoryValue: bigint;
-          if (product.stock.lessThan(0)) {
-            const remainingQuantity = newStock.greaterThan(0)
-              ? newStock
-              : new Prisma.Decimal(0);
-            const quantityUnits = BigInt(quantity.mul(1_000_000).toFixed(0));
-            const remainingUnits = BigInt(remainingQuantity.mul(1_000_000).toFixed(0));
-            newInventoryValue = quantityUnits > 0n
-              ? (totalCost * remainingUnits) / quantityUnits
-              : 0n;
-          } else {
-            newInventoryValue = product.inventoryValue + totalCost;
-          }
+          const inventory = addInventoryStock(
+            product.stock,
+            product.inventoryValue,
+            quantity,
+            totalCost,
+          );
+          const { stock: newStock, inventoryValue: newInventoryValue, averageCost: newAverageCost } = inventory;
           if (newInventoryValue > MAX_CURRENCY_RIAL || newInventoryValue < 0n) {
             throw new Error("INVENTORY_VALUE_OVERFLOW");
           }
@@ -510,9 +686,7 @@ export async function POST(request: NextRequest) {
             data: {
               stock: newStock,
               inventoryValue: newInventoryValue,
-              averageCost: newStock.greaterThan(0)
-                ? new Prisma.Decimal(newInventoryValue.toString()).div(newStock)
-                : new Prisma.Decimal(0),
+              averageCost: newAverageCost,
             },
           });
           if (updated.count !== 1) throw new Error("STOCK_CONFLICT");
@@ -524,7 +698,7 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          await tx.inventoryMovement.create({
+          const movement = await tx.inventoryMovement.create({
             data: {
               businessId,
               productId,
@@ -532,12 +706,11 @@ export async function POST(request: NextRequest) {
               type: "PURCHASE",
               quantity,
               totalCost,
-              averageCost: newStock.greaterThan(0)
-                ? new Prisma.Decimal(newInventoryValue.toString()).div(newStock)
-                : new Prisma.Decimal(0),
+              averageCost: newAverageCost,
               description: `صدور فاکتور خرید ${created.invoiceNumber}`,
             },
           });
+          await reconcileNegativeStockBackorders(tx, movement);
         }
 
         const issued = await tx.invoice.updateMany({
@@ -562,7 +735,11 @@ export async function POST(request: NextRequest) {
           items: { include: { product: { select: { name: true, unit: true } } } },
         },
       });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      maxWait: 10000,
+      timeout: 20000,
+    });
 
     return NextResponse.json(
       {
@@ -592,6 +769,12 @@ export async function POST(request: NextRequest) {
         { status: 400 },
       );
     }
+    if (error instanceof Error && error.message === "INVOICE_NUMBER_OVERFLOW") {
+      return NextResponse.json(
+        { message: "ظرفیت شماره‌گذاری فاکتور کسب‌وکار به پایان رسیده است." },
+        { status: 409 },
+      );
+    }
     if (error instanceof Error && error.message === "INVENTORY_VALUE_OVERFLOW") {
       return NextResponse.json(
         { message: "ارزش موجودی از محدوده مجاز سامانه بیشتر است." },
@@ -600,7 +783,7 @@ export async function POST(request: NextRequest) {
     }
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
       return NextResponse.json(
-        { message: "موجودی هم‌زمان تغییر کرده است. دوباره تلاش کنید." },
+        { message: "تداخل هم‌زمان در شماره‌گذاری فاکتور یا موجودی رخ داد؛ دوباره تلاش کنید." },
         { status: 409 },
       );
     }
