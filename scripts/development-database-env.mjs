@@ -41,8 +41,18 @@ function projectReference(value) {
   }
 }
 
-export function configureDevelopmentDatabaseEnvironment({ forceDevelopment = false } = {}) {
-  if (process.env.NODE_ENV === "production") {
+export function configureDevelopmentDatabaseEnvironment({
+  forceDevelopment = false,
+  command: requestedCommand,
+} = {}) {
+  const command = requestedCommand ?? process.argv.find((argument) =>
+    ["generate", "migrate", "db", "studio", "validate"].includes(argument)
+  );
+  const productionDeployment =
+    process.env.NODE_ENV === "production" ||
+    (process.env.VERCEL === "1" && process.env.VERCEL_ENV === "production");
+
+  if (productionDeployment) {
     if (forceDevelopment) {
       throw new Error(
         "A development database check cannot run while NODE_ENV is production.",
@@ -53,9 +63,31 @@ export function configureDevelopmentDatabaseEnvironment({ forceDevelopment = fal
         "Production Prisma commands require HIRAD_DATABASE_ENV=production to be set explicitly.",
       );
     }
-    loadDotEnv({ path: ".env", override: false, ...dotenvOptions });
+    if (command === "generate") {
+      process.env.DATABASE_URL =
+        "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate";
+      process.env.DIRECT_URL =
+        "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate";
+      return;
+    }
+    for (const name of ["DATABASE_URL", "DIRECT_URL"]) {
+      if (!databaseIdentity(process.env[name])) {
+        throw new Error(
+          `Production Prisma operations require ${name} to be provided explicitly by the deployment environment.`,
+        );
+      }
+    }
     return;
   }
+
+  if (command === "generate") {
+    process.env.DATABASE_URL =
+      "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate";
+    process.env.DIRECT_URL =
+      "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate";
+    return;
+  }
+
   if (
     process.env.HIRAD_DATABASE_ENV &&
     process.env.HIRAD_DATABASE_ENV !== "development"

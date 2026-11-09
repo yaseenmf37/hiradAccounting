@@ -74,15 +74,95 @@ test("development config refuses missing local env and production-equivalent tar
   restoreEnvironment();
 });
 
-test("production config does not require or load development credentials", () => {
+test("Prisma generate replaces inherited database URLs with non-routable placeholders", () => {
+  restoreEnvironment();
+  process.env.DATABASE_URL =
+    "postgresql://postgres.devref:secret@aws-0-region.pooler.supabase.com:6543/postgres";
+  process.env.DIRECT_URL =
+    "postgresql://postgres:secret@db.devref.supabase.co:5432/postgres";
+  inTemporaryDirectory(
+    () => {
+      configureDevelopmentDatabaseEnvironment({ command: "generate" });
+      assert.equal(process.env.HIRAD_DATABASE_ENV, undefined);
+      assert.equal(
+        process.env.DATABASE_URL,
+        "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate",
+      );
+      assert.equal(process.env.DIRECT_URL, process.env.DATABASE_URL);
+      assert.doesNotMatch(process.env.DATABASE_URL, /prodref/);
+      assert.doesNotMatch(process.env.DATABASE_URL, /devref/);
+    },
+    { development: false },
+  );
+  restoreEnvironment();
+});
+
+test("production Prisma generate requires production marker but needs no DB URL", () => {
+  restoreEnvironment();
+  process.env.NODE_ENV = "production";
+  assert.throws(
+    () => configureDevelopmentDatabaseEnvironment({ command: "generate" }),
+    /HIRAD_DATABASE_ENV=production/,
+  );
+  restoreEnvironment();
+
+  process.env.NODE_ENV = "production";
+  process.env.HIRAD_DATABASE_ENV = "production";
+  inTemporaryDirectory(
+    () => {
+      configureDevelopmentDatabaseEnvironment({ command: "generate" });
+      assert.equal(process.env.HIRAD_DATABASE_ENV, "production");
+      assert.equal(
+        process.env.DATABASE_URL,
+        "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate",
+      );
+      assert.equal(process.env.DIRECT_URL, process.env.DATABASE_URL);
+    },
+    { development: false },
+  );
+  restoreEnvironment();
+});
+
+test("Vercel production requires its marker even if NODE_ENV is unset", () => {
+  restoreEnvironment();
+  process.env.VERCEL = "1";
+  process.env.VERCEL_ENV = "production";
+  inTemporaryDirectory(
+    () => {
+      assert.throws(
+        () => configureDevelopmentDatabaseEnvironment({ command: "generate" }),
+        /HIRAD_DATABASE_ENV=production/,
+      );
+      process.env.HIRAD_DATABASE_ENV = "production";
+      configureDevelopmentDatabaseEnvironment({ command: "generate" });
+      assert.equal(process.env.HIRAD_DATABASE_ENV, "production");
+      assert.equal(
+        process.env.DIRECT_URL,
+        "postgresql://prisma:generate-only@127.0.0.1:5432/prisma_generate",
+      );
+    },
+    { development: false },
+  );
+  restoreEnvironment();
+});
+
+test("production Prisma operations require injected URLs and do not load .env", () => {
   restoreEnvironment();
   process.env.NODE_ENV = "production";
   process.env.HIRAD_DATABASE_ENV = "production";
   inTemporaryDirectory(() => {
-    configureDevelopmentDatabaseEnvironment();
-    assert.equal(process.env.HIRAD_DATABASE_ENV, "production");
-    assert.match(process.env.DATABASE_URL, /prodref/);
-    assert.match(process.env.DIRECT_URL, /prodref/);
+    assert.throws(
+      () => configureDevelopmentDatabaseEnvironment({ command: "migrate" }),
+      /DATABASE_URL to be provided explicitly/,
+    );
+    process.env.DATABASE_URL =
+      "postgresql://postgres.live:secret@aws-0-region.pooler.supabase.com:6543/postgres";
+    process.env.DIRECT_URL =
+      "postgresql://postgres:secret@db.live.supabase.co:5432/postgres";
+    configureDevelopmentDatabaseEnvironment({ command: "migrate" });
+    assert.match(process.env.DATABASE_URL, /live/);
+    assert.match(process.env.DIRECT_URL, /live/);
+    assert.doesNotMatch(process.env.DATABASE_URL, /prodref/);
   }, { development: false });
   restoreEnvironment();
 });
