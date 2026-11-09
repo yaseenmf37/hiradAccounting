@@ -360,6 +360,7 @@ function MonthlyProductDetailsModal({
                     <table className="w-full min-w-[850px] text-sm">
                       <thead className="bg-white/[0.025] text-right text-xs text-zinc-500">
                         <tr>
+                          <th className="p-3 font-medium">ردیف</th>
                           <th className="p-3 font-medium">نام محصول</th>
                           <th className="p-3 font-medium">تعداد فروخته‌شده</th>
                           <th className="p-3 font-medium">مبلغ فروش</th>
@@ -369,8 +370,9 @@ function MonthlyProductDetailsModal({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-white/[0.05]">
-                        {items.map((item) => (
+                        {items.map((item, index) => (
                           <tr key={`${item.month}-${item.productId}`} className="text-zinc-300">
+                            <td className="p-3 text-zinc-500">{formatQuantityAmount(String(index + 1))}</td>
                             <td className="p-3 font-medium text-white">{item.productName}</td>
                             <td className="p-3">{formatQuantityAmount(item.quantitySold)}</td>
                             <td className="p-3 text-emerald-400">{formatAmount(item.sales, unit)}</td>
@@ -386,6 +388,7 @@ function MonthlyProductDetailsModal({
                       </tbody>
                       <tfoot className="border-t border-white/10 bg-white/[0.025] font-semibold text-white">
                         <tr>
+                          <td className="p-3">—</td>
                           <td className="p-3">مجموع</td>
                           <td className="p-3">—</td>
                           <td className="p-3 text-emerald-400">{formatAmount(total("sales").toString(), unit)}</td>

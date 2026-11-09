@@ -2087,6 +2087,7 @@ const detailGrossProfit = detailInvoice
                   <table className="w-full min-w-[620px] border-collapse text-right text-xs">
                     <thead className="bg-[#0d141c] text-slate-400">
                       <tr>
+                        <th className="w-16 border border-[#344353] px-3 py-3 text-center font-medium">ردیف</th>
                         <th className="border border-[#344353] px-3 py-3 font-medium">نام محصول</th>
                         <th className="w-36 border border-[#344353] px-3 py-3 font-medium">تعداد</th>
                         <th className="w-44 border border-[#344353] px-3 py-3 font-medium">قیمت واحد</th>
@@ -2099,6 +2100,7 @@ const detailGrossProfit = detailInvoice
                         const lineTotal = lineAmount(item.quantity, item.unitPrice, currencyUnit);
                         return (
                           <tr key={index} className="bg-[#0d141c]">
+                            <td className="border border-[#344353] px-3 py-3 text-center text-slate-400">{moneyFormat.format(index + 1)}</td>
                             <td className="min-w-64 border border-[#344353] px-3 py-3">
                               <select
                                 required
@@ -2453,6 +2455,7 @@ const detailGrossProfit = detailInvoice
                 <table className="w-full min-w-[560px] text-sm">
                   <thead className="bg-[#0d141c] text-xs text-slate-500">
                     <tr>
+                      <th className="p-3 text-right">ردیف</th>
                       <th className="p-3 text-right">کالا</th>
                       <th className="p-3 text-right">تعداد</th>
                       <th className="p-3 text-right">قیمت واحد</th>
@@ -2463,6 +2466,7 @@ const detailGrossProfit = detailInvoice
                   <tbody>
                     {detailInvoice.items.map((item, index) => (
                       <tr key={item.id ?? index} className="border-t border-[#263341]">
+                        <td className="p-3 text-slate-400">{moneyFormat.format(index + 1)}</td>
                         <td className="p-3 text-white">{item.product?.name ?? "کالا"}</td>
                         <td className="p-3 text-slate-300">{formatQuantity(item.quantity)}</td>
                         <td className="p-3 text-slate-300">
@@ -2541,9 +2545,9 @@ const detailGrossProfit = detailInvoice
                       <p className="mt-1 text-xs text-slate-400">
                         تعداد اقلام مرجوعی: {moneyFormat.format(invoiceReturn.items.length)} قلم
                       </p>
-                      {invoiceReturn.items.map((item) => (
+                      {invoiceReturn.items.map((item, index) => (
                         <p key={item.id} className="mt-1 text-xs text-slate-500">
-                          {item.product.name}: {formatQuantity(item.quantity)} {item.product.unit}
+                          {moneyFormat.format(index + 1)}. {item.product.name}: {formatQuantity(item.quantity)} {item.product.unit}
                           {" · مبلغ ثبت‌شده: "}{formatMoney(item.amount, currencyUnit)}
                         </p>
                       ))}
@@ -2617,52 +2621,56 @@ const detailGrossProfit = detailInvoice
                           item.id && remainingReturnQuantity(detailInvoice, item.id) > 0n
                         ).length)} قلم
                       </p>
-                      {detailInvoice.items.map((item) => {
-                        const available = item.id ? remainingReturnQuantity(detailInvoice, item.id) : 0n;
-                        if (available <= 0n) return null;
-                        return (
-                          <div key={item.id} className="grid items-center gap-3 rounded-lg border border-[#263341] p-3 text-sm sm:grid-cols-[1fr_120px_160px]">
-                            <span className="text-slate-300">
-                              {item.product?.name ?? "کالا"}
-                              <span className="mt-1 block text-xs text-slate-500">
-                                باقی‌مانده: {formatQuantityUnits(available)} {item.product?.unit}
+                      {detailInvoice.items
+                        .filter((item) =>
+                          item.id && remainingReturnQuantity(detailInvoice, item.id) > 0n
+                        )
+                        .map((item, index) => {
+                          const available = item.id ? remainingReturnQuantity(detailInvoice, item.id) : 0n;
+                          return (
+                            <div key={item.id} className="grid items-center gap-3 rounded-lg border border-[#263341] p-3 text-sm sm:grid-cols-[1fr_120px_160px]">
+                              <span className="text-slate-300">
+                                <span className="ml-2 text-slate-500">{moneyFormat.format(index + 1)}.</span>
+                                {item.product?.name ?? "کالا"}
+                                <span className="mt-1 block text-xs text-slate-500">
+                                  باقی‌مانده: {formatQuantityUnits(available)} {item.product?.unit}
+                                </span>
                               </span>
-                            </span>
-                            <label className="space-y-1 text-xs text-slate-400">
-                              <span className="block">مقدار مرجوعی</span>
-                              <NumericInput
-                                min="0"
-                                max={formatQuantityUnits(available)}
-                                step="0.001"
-                                value={returnQuantities[item.id ?? ""] ?? "0"}
-                                onChange={(event) => item.id && setReturnQuantities((current) => ({ ...current, [item.id!]: event.target.value }))}
-                                className="w-full rounded-lg border border-[#263341] bg-[#0d141c] p-2 text-white"
-                              />
-                            </label>
-                            <label className="space-y-1 text-xs text-slate-400">
-                              <span className="block">قیمت واحد مرجوعی ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})</span>
-                              <NumericInput
-                                min="0"
-                                step={currencyUnit === "TOMAN" ? "0.1" : "1"}
-                                value={returnUnitPrices[item.id ?? ""] ?? historicalReturnUnitPrice(detailInvoice, item, currencyUnit)}
-                                onChange={(event) => {
-                                  if (!item.id) return;
-                                  const value = event.target.value;
-                                  const historical = historicalReturnUnitPrice(detailInvoice, item, currencyUnit);
-                                  setReturnUnitPrices((current) => {
-                                    if (normalizeDigits(value) === normalizeDigits(historical)) {
-                                      const next = { ...current };
-                                      delete next[item.id!];
-                                      return next;
-                                    }
-                                    return { ...current, [item.id!]: value };
-                                  });
-                                }}
-                                className="w-full rounded-lg border border-[#263341] bg-[#0d141c] p-2 text-white"
-                              />
-                            </label>
-                          </div>
-                        );
+                              <label className="space-y-1 text-xs text-slate-400">
+                                <span className="block">مقدار مرجوعی</span>
+                                <NumericInput
+                                  min="0"
+                                  max={formatQuantityUnits(available)}
+                                  step="0.001"
+                                  value={returnQuantities[item.id ?? ""] ?? "0"}
+                                  onChange={(event) => item.id && setReturnQuantities((current) => ({ ...current, [item.id!]: event.target.value }))}
+                                  className="w-full rounded-lg border border-[#263341] bg-[#0d141c] p-2 text-white"
+                                />
+                              </label>
+                              <label className="space-y-1 text-xs text-slate-400">
+                                <span className="block">قیمت واحد مرجوعی ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})</span>
+                                <NumericInput
+                                  min="0"
+                                  step={currencyUnit === "TOMAN" ? "0.1" : "1"}
+                                  value={returnUnitPrices[item.id ?? ""] ?? historicalReturnUnitPrice(detailInvoice, item, currencyUnit)}
+                                  onChange={(event) => {
+                                    if (!item.id) return;
+                                    const value = event.target.value;
+                                    const historical = historicalReturnUnitPrice(detailInvoice, item, currencyUnit);
+                                    setReturnUnitPrices((current) => {
+                                      if (normalizeDigits(value) === normalizeDigits(historical)) {
+                                        const next = { ...current };
+                                        delete next[item.id!];
+                                        return next;
+                                      }
+                                      return { ...current, [item.id!]: value };
+                                    });
+                                  }}
+                                  className="w-full rounded-lg border border-[#263341] bg-[#0d141c] p-2 text-white"
+                                />
+                              </label>
+                            </div>
+                          );
                       })}
                       <label className="block space-y-2 text-sm text-slate-300">
                         مبلغ بازپرداخت‌شده اکنون ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})

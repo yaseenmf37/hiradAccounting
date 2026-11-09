@@ -776,9 +776,10 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1150px] text-right text-sm">
+            <table className="w-full min-w-[1200px] text-right text-sm">
               <thead className="bg-[#0b0f14] text-xs text-slate-500">
                 <tr>
+                  <th className="px-3 py-4 font-medium">ردیف</th>
                   <th className="px-3 py-4">
                     <input
                       type="checkbox"
@@ -803,7 +804,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
               </thead>
 
               <tbody className="divide-y divide-[#222d38]">
-                {filteredProducts.map((product) => {
+                {filteredProducts.map((product, index) => {
                   const lowStock =
                     Number(product.stock) <= Number(product.minStock);
 
@@ -812,6 +813,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
                       key={product.id}
                       className="transition hover:bg-white/[0.02]"
                     >
+                      <td className="px-3 py-4 text-slate-500">{formatNumber(index + 1)}</td>
                       <td className="px-3 py-4">
                         <input
                           type="checkbox"
@@ -975,10 +977,11 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
             </p>
             <div className="max-h-60 overflow-y-auto rounded-xl border border-[#293642]">
               <table className="w-full text-right text-xs">
-                <thead><tr className="text-slate-500"><th className="p-3">کالا</th><th className="p-3">قیمت فعلی</th><th className="p-3">قیمت جدید</th></tr></thead>
+                <thead><tr className="text-slate-500"><th className="p-3">ردیف</th><th className="p-3">کالا</th><th className="p-3">قیمت فعلی</th><th className="p-3">قیمت جدید</th></tr></thead>
                 <tbody>
-                  {bulkPricePreview.map((item) => (
+                  {bulkPricePreview.map((item, index) => (
                     <tr key={item.id} className="border-t border-[#293642] text-slate-300">
+                      <td className="p-3 text-slate-500">{formatNumber(index + 1)}</td>
                       <td className="p-3">{item.name}</td>
                       <td className="p-3">{formatMoney(item.before.toString(), currencyUnit)}</td>
                       <td className="p-3 text-green-400">{formatMoney(item.after.toString(), currencyUnit)}</td>
@@ -1007,10 +1010,11 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px] text-right text-sm">
-              <thead className="text-xs text-slate-500"><tr><th className="p-4">کالا</th><th className="p-4">موجودی فعلی</th><th className="p-4">مقدار کسری</th></tr></thead>
+              <thead className="text-xs text-slate-500"><tr><th className="p-4">ردیف</th><th className="p-4">کالا</th><th className="p-4">موجودی فعلی</th><th className="p-4">مقدار کسری</th></tr></thead>
               <tbody>
-                {backorders.map((entry) => (
+                {backorders.map((entry, index) => (
                   <tr key={entry.id} className="border-t border-[#222d38] text-slate-300">
+                    <td className="p-4 text-slate-500">{formatNumber(index + 1)}</td>
                     <td className="p-4">{entry.product.name}</td>
                     <td className="p-4 text-rose-400">
                       {formatNumber(entry.product.stock)} {entry.product.unit}

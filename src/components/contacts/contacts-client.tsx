@@ -1352,6 +1352,7 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
         <table className="w-full min-w-[560px] text-right text-sm">
           <thead className="bg-[#111b24] text-xs text-slate-400">
             <tr>
+              <th className="p-3">ردیف</th>
               <th className="p-3">کالا</th>
               <th className="p-3">تعداد</th>
               <th className="p-3">قیمت واحد</th>
@@ -1359,8 +1360,9 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
             </tr>
           </thead>
           <tbody className="divide-y divide-[#293642]">
-            {ledgerInvoiceDetail.items.map((item) => (
+            {ledgerInvoiceDetail.items.map((item, index) => (
               <tr key={item.id} className="text-slate-300">
+                <td className="p-3 text-slate-500">{new Intl.NumberFormat("fa-IR").format(index + 1)}</td>
                 <td className="p-3 text-white">{item.product.name}</td>
                 <td className="p-3">{new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 3 }).format(Number(item.quantity))} {item.product.unit}</td>
                 <td className="p-3">{formatLedgerAmount(item.unitPrice)}</td>

@@ -236,3 +236,9 @@ test("an empty invoice shows a zero item count and keeps the fixed row height", 
   assert.match(markup, /تعداد اقلام: ۰ قلم/);
   assert.equal(countMatches(markup, /class="print-invoice-empty-row"/g), 35);
 });
+
+test("printed amount words express fractional Rial values only in Toman", () => {
+  const markup = renderInvoice(createInvoice("SALE", 0, 0, 15));
+  assert.match(markup, /یک و پنج دهم تومان/);
+  assert.doesNotMatch(markup, /ریال/);
+});

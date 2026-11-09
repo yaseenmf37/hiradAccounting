@@ -109,9 +109,9 @@ export function rialAmountToPersianTomanWords(rialAmount: bigint | string) {
   const rialRemainder = absolute % 10n;
   const words = numberToPersianWords(wholeToman);
   const fractionWords = rialRemainder
-    ? ` و ${numberToPersianWords(rialRemainder)} ریال`
+    ? ` و ${numberToPersianWords(rialRemainder)} دهم`
     : "";
-  return `${negative ? "منفی " : ""}${words} تومان${fractionWords}`;
+  return `${negative ? "منفی " : ""}${words}${fractionWords} تومان`;
 }
 
 export function countInvoiceItemRows<T extends { productId: string }>(

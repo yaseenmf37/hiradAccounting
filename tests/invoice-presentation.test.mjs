@@ -87,7 +87,9 @@ test("Rial totals format in Toman and Persian words including zero, fractions, a
   assert.equal(formatRialAsToman("0"), "۰ تومان");
   assert.equal(rialAmountToPersianTomanWords("0"), "صفر تومان");
   assert.equal(formatRialAsToman("15"), "۱٫۵ تومان");
-  assert.equal(rialAmountToPersianTomanWords("15"), "یک تومان و پنج ریال");
+  assert.equal(rialAmountToPersianTomanWords("15"), "یک و پنج دهم تومان");
+  assert.equal(rialAmountToPersianTomanWords("1"), "صفر و یک دهم تومان");
+  assert.equal(rialAmountToPersianTomanWords("-15"), "منفی یک و پنج دهم تومان");
   assert.equal(numberToPersianWords("123456"), "یکصد و بیست و سه هزار و چهارصد و پنجاه و شش");
   assert.equal(numberToPersianWords("900000000000000000"), "نهصد کوادریلیون");
   assert.equal(rialAmountToPersianTomanWords("9000000000000000000"), "نهصد کوادریلیون تومان");
