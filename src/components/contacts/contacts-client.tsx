@@ -1346,6 +1346,9 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
       </div>
 
       <div className="overflow-x-auto rounded-xl border border-[#293642]">
+        <p className="px-3 pt-3 text-xs text-slate-400">
+          تعداد اقلام فاکتور: {new Intl.NumberFormat("fa-IR").format(ledgerInvoiceDetail.items.length)} قلم
+        </p>
         <table className="w-full min-w-[560px] text-right text-sm">
           <thead className="bg-[#111b24] text-xs text-slate-400">
             <tr>

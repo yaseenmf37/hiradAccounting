@@ -4,9 +4,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { createPortal } from "react-dom";
 import {
-  Plus, Search, RefreshCw, FileText, ShoppingCart, TrendingUp,
+  Plus, Search, RefreshCw, FileText,
   X, Trash2, Pencil, Eye, CheckCircle2, Ban, Loader2,
-  Package, Calculator, ChevronDown,
   Printer, RotateCcw,
 } from "lucide-react";
 import { currencyInputToRial } from "@/lib/currency";
@@ -20,6 +19,22 @@ import DateObject from "react-date-object";
 import persian from "react-date-object/calendars/persian";
 import persian_fa from "react-date-object/locales/persian_fa";
 import { formatInvoiceDate, invoiceDateToDay, toInvoiceDateObject } from "@/lib/invoice-dates";
+import InvoicePrintView from "@/components/invoices/invoice-print-view";
+import {
+  enqueueOfflineOperation,
+  getCachedEndpointCollection,
+  getOfflineAccountKey,
+  getOfflineOutboxOperations,
+  isOfflineWorkspaceUnlocked,
+  removeOfflineOutboxOperation,
+  type DecryptedOfflineOutboxOperation,
+  updateOfflineOutboxOperation,
+} from "@/lib/offline-storage";
+import { syncOfflineOutbox } from "@/lib/offline-outbox-sync";
+import {
+  countInvoiceItemRows,
+  filterInvoiceProducts,
+} from "@/lib/invoice-presentation";
 
 type CurrencyUnit = "RIAL" | "TOMAN";
 type InvoiceType = "PURCHASE" | "SALE";
@@ -28,6 +43,8 @@ type InvoiceStatus = "DRAFT" | "ISSUED" | "CANCELLED";
 type Props = {
   currencyUnit: CurrencyUnit;
   initialType: InvoiceType;
+  userId: string;
+  businessId: string;
   quickAction?: QuickAction | null;
 };
 
@@ -39,6 +56,13 @@ type Product = {
   purchasePrice: string;
   salePrice: string;
   stock: string;
+  categoryId: string | null;
+  category?: { id: string; name: string } | null;
+};
+
+type ProductCategory = {
+  id: string;
+  name: string;
 };
 
 type Contact = {
@@ -89,6 +113,9 @@ type InvoiceReturn = {
 };
 
 type Invoice = {
+  offlineOperationId?: string;
+  offlineSyncStatus?: "pending" | "syncing" | "failed" | "synced";
+  offlineSyncError?: string | null;
   costingRecordedAt?: string | null;
   id: string;
   invoiceNumber: string;
@@ -197,20 +224,6 @@ function percentageDiscountAmount(base: bigint, value: string) {
   const units = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
   if (units > 10000n) return null;
   return (base * units + 5000n) / 10000n;
-}
-
-function allocatePrintDiscount(discount: bigint, items: InvoiceItem[]) {
-  const weights = items.map((item) => BigInt(item.total ?? "0"));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
-  if (totalWeight <= 0n) return weights.map(() => 0n);
-
-  const allocations = weights.map((weight) => (discount * weight) / totalWeight);
-  let remainder = discount - allocations.reduce((sum, amount) => sum + amount, 0n);
-  for (let index = 0; remainder > 0n; index = (index + 1) % allocations.length) {
-    allocations[index] += 1n;
-    remainder -= 1n;
-  }
-  return allocations;
 }
 
 function formatDiscountPercent(value: string) {
@@ -357,6 +370,25 @@ function statusClass(status: InvoiceStatus) {
   }[status];
 }
 
+function invoiceFromOutbox(
+  operation: DecryptedOfflineOutboxOperation
+): Invoice | null {
+  const payload = operation.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const localInvoice = (payload as Record<string, unknown>).localInvoice;
+  if (!localInvoice || typeof localInvoice !== "object" || Array.isArray(localInvoice)) {
+    return null;
+  }
+  return {
+    ...(localInvoice as Invoice),
+    id: operation.entityId,
+    invoiceNumber: operation.serverNumber ?? (localInvoice as Invoice).invoiceNumber,
+    offlineOperationId: operation.operationId,
+    offlineSyncStatus: operation.status,
+    offlineSyncError: operation.lastError,
+  };
+}
+
 async function readResponse(response: Response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -385,10 +417,18 @@ async function readResponse(response: Response) {
   return data;
 }
 
-export default function InvoicesClient({ currencyUnit, initialType, quickAction }: Props) {
-  const [type, setType] = useState<InvoiceType>(initialType);  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [printContainer, setPrintContainer] = useState<HTMLElement | null>(null);
+export default function InvoicesClient({
+  currencyUnit,
+  initialType,
+  quickAction,
+  userId,
+  businessId,
+}: Props) {
+  const [type] = useState<InvoiceType>(initialType);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [productCategories, setProductCategories] = useState<ProductCategory[]>([]);
+  const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -397,6 +437,8 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [outboxCount, setOutboxCount] = useState<number | null>(null);
+  const [isOnline, setIsOnline] = useState(true);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [detailInvoice, setDetailInvoice] = useState<Invoice | null>(null);
@@ -414,6 +456,8 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
   const [returnRefundDestination, setReturnRefundDestination] = useState("");
   const [returnDescription, setReturnDescription] = useState("");
   const returnRequestRef = useRef<{ key: string; body: string } | null>(null);
+  const createInvoiceRequestRef = useRef<{ key: string; body: string } | null>(null);
+  const handledQuickActionRef = useRef<number | null>(null);
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
 
   const [contactId, setContactId] = useState("");
@@ -439,16 +483,32 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
   const debouncedSearch = useDebouncedValue(search);
   const debouncedContactSearch = useDebouncedValue(contactSearch);
   const paging = useCursorPage();
+  const pageCursor = paging.cursor;
+  const setNextPageCursor = paging.setNextCursor;
 
   useEffect(() => {
-    setPrintContainer(document.body);
+    const updateConnection = () => setIsOnline(navigator.onLine);
+    updateConnection();
+    window.addEventListener("online", updateConnection);
+    window.addEventListener("offline", updateConnection);
+    return () => {
+      window.removeEventListener("online", updateConnection);
+      window.removeEventListener("offline", updateConnection);
+    };
   }, []);
 
   const printInvoice = () => {
     const cleanup = () => document.body.classList.remove("printing-invoice");
     document.body.classList.add("printing-invoice");
     window.addEventListener("afterprint", cleanup, { once: true });
-    window.print();
+    try {
+      window.print();
+    } catch (err) {
+      window.removeEventListener("afterprint", cleanup);
+      cleanup();
+      console.error("Invoice print preview could not be opened:", err);
+      setError("پیش‌نمایش چاپ باز نشد. مرورگر را بررسی و دوباره تلاش کنید.");
+    }
   };
 
   const loadData = useCallback(async (signal?: AbortSignal) => {
@@ -463,7 +523,7 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
         search: debouncedSearch.trim(),
         limit: "50",
       });
-      if (paging.cursor) params.set("cursor", paging.cursor);
+      if (pageCursor) params.set("cursor", pageCursor);
       if (startDate) params.set("startDate", invoiceDateToDay(startDate));
       if (endDate) params.set("endDate", invoiceDateToDay(endDate));
 
@@ -473,63 +533,189 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
       });
       const invoiceData = await readResponse(invoiceResponse);
 
-      setInvoices(invoiceData.invoices ?? []);
-      setTotalCount(invoiceData.total ?? 0);
-      paging.setNextCursor(invoiceData.nextCursor ?? null);
+      const serverInvoices: Invoice[] = invoiceData.invoices ?? [];
+      const account = getOfflineAccountKey(userId, businessId);
+      const unlocked = isOfflineWorkspaceUnlocked(account);
+      const queuedOperations = unlocked
+        ? await getOfflineOutboxOperations(account)
+        : [];
+      const presentServerIds = new Set(serverInvoices.map((invoice) => invoice.id));
+      const localInvoices = queuedOperations
+        .map(invoiceFromOutbox)
+        .filter((invoice): invoice is Invoice => Boolean(invoice))
+        .filter((invoice) =>
+          !presentServerIds.has(invoice.id) &&
+          !(invoice.offlineSyncStatus === "synced" && invoice.offlineOperationId &&
+            queuedOperations.some((operation) =>
+              operation.operationId === invoice.offlineOperationId &&
+              operation.serverId &&
+              presentServerIds.has(operation.serverId)
+            ))
+        )
+        .filter((invoice) => invoice.type === type)
+        .filter((invoice) =>
+          statusFilter === "ALL" || invoice.status === statusFilter
+        )
+        .filter((invoice) =>
+          !debouncedSearch.trim() ||
+          JSON.stringify(invoice).toLocaleLowerCase().includes(debouncedSearch.trim().toLocaleLowerCase())
+        );
+      for (const operation of queuedOperations) {
+        if (operation.status === "synced" && operation.serverId && presentServerIds.has(operation.serverId)) {
+          await removeOfflineOutboxOperation(operation.operationId, account, false);
+        }
+      }
+      if (unlocked) {
+        setOutboxCount(queuedOperations.filter((operation) =>
+          operation.status !== "synced"
+        ).length);
+      }
+      setInvoices([...localInvoices, ...serverInvoices]);
+      setTotalCount((invoiceData.total ?? 0) + localInvoices.length);
+      setNextPageCursor(invoiceData.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : "خطا در دریافت اطلاعات.");
+      if (navigator.onLine && !(err instanceof TypeError)) {
+        setError(err instanceof Error ? err.message : "خطا در دریافت اطلاعات.");
+        return;
+      }
+      try {
+        const account = getOfflineAccountKey(userId, businessId);
+        if (!isOfflineWorkspaceUnlocked(account)) {
+          setError("برای مشاهده اطلاعات ذخیره‌شده و صف آفلاین، قفل محلی حساب را باز کنید.");
+          return;
+        }
+        const [cachedInvoices, queuedOperations] = await Promise.all([
+          getCachedEndpointCollection(account, "/api/invoices", "invoices"),
+          getOfflineOutboxOperations(account),
+        ]);
+        const serverInvoices = cachedInvoices as Invoice[];
+        const presentServerIds = new Set(serverInvoices.map((invoice) => invoice.id));
+        const localInvoices = queuedOperations
+          .map(invoiceFromOutbox)
+          .filter((invoice): invoice is Invoice => Boolean(invoice))
+          .filter((invoice) =>
+            !presentServerIds.has(invoice.id) &&
+            !(invoice.offlineSyncStatus === "synced" && invoice.offlineOperationId &&
+              queuedOperations.some((operation) =>
+                operation.operationId === invoice.offlineOperationId &&
+                operation.serverId &&
+                presentServerIds.has(operation.serverId)
+              ))
+          )
+          .filter((invoice) => invoice.type === type)
+          .filter((invoice) => statusFilter === "ALL" || invoice.status === statusFilter)
+          .filter((invoice) =>
+            !debouncedSearch.trim() ||
+            JSON.stringify(invoice).toLocaleLowerCase().includes(debouncedSearch.trim().toLocaleLowerCase())
+          );
+        setOutboxCount(queuedOperations.filter((operation) => operation.status !== "synced").length);
+        setInvoices([...localInvoices, ...serverInvoices.filter((invoice) => invoice.type === type)]);
+        setTotalCount(localInvoices.length + serverInvoices.filter((invoice) => invoice.type === type).length);
+        setNextPageCursor(null);
+        setError("");
+      } catch (offlineError) {
+        console.error("Offline invoice list load failed:", offlineError);
+        setError(err instanceof Error ? err.message : "خطا در دریافت اطلاعات.");
+      }
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [type, statusFilter, settlementFilter, debouncedSearch, paging.cursor, paging.setNextCursor, startDate, endDate]);
+  }, [type, statusFilter, settlementFilter, debouncedSearch, pageCursor, setNextPageCursor, startDate, endDate, userId, businessId]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadData(controller.signal);
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) void loadData(controller.signal);
+    });
     return () => controller.abort();
   }, [loadData]);
 
   useEffect(() => {
-    if (
-      quickAction?.action === "invoice" &&
-      quickAction.targetView ===
-        (initialType === "PURCHASE" ? "purchase-invoices" : "sales-invoices")
-    ) {
-      openNewInvoice();
-    }
-  }, [quickAction?.requestId, quickAction?.action, quickAction?.targetView, initialType]);
+    const refresh = () => void loadData();
+    window.addEventListener("hirad-offline-outbox-updated", refresh);
+    window.addEventListener("hirad-offline-sync-succeeded", refresh);
+    const syncWhenOnline = () => {
+      const account = getOfflineAccountKey(userId, businessId);
+      if (!isOfflineWorkspaceUnlocked(account)) return;
+      void syncOfflineOutbox(getOfflineAccountKey(userId, businessId)).catch(
+        (syncError: unknown) => {
+          console.error("Offline invoice synchronization failed:", syncError);
+        }
+      );
+    };
+    const workspaceUnlocked = () => {
+      setOutboxCount(null);
+      void loadData();
+      syncWhenOnline();
+    };
+    const workspaceLocked = () => setOutboxCount(null);
+    window.addEventListener("online", syncWhenOnline);
+    window.addEventListener("hirad-offline-workspace-unlocked", workspaceUnlocked);
+    window.addEventListener("hirad-offline-workspace-locked", workspaceLocked);
+    syncWhenOnline();
+    return () => {
+      window.removeEventListener("hirad-offline-outbox-updated", refresh);
+      window.removeEventListener("hirad-offline-sync-succeeded", refresh);
+      window.removeEventListener("online", syncWhenOnline);
+      window.removeEventListener("hirad-offline-workspace-unlocked", workspaceUnlocked);
+      window.removeEventListener("hirad-offline-workspace-locked", workspaceLocked);
+    };
+  }, [loadData, userId, businessId]);
 
   useEffect(() => {
     if (!modalOpen) return;
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
-        const query = productSearch.trim();
-        if (!query) {
-          const response = await fetch("/api/products?limit=100", {
+        const results: Product[] = [];
+        let cursor: string | null = null;
+        do {
+          const params = new URLSearchParams({ limit: "100" });
+          if (productSearch.trim()) params.set("search", productSearch.trim());
+          if (productCategoryFilter !== "all") {
+            params.set("categoryId", productCategoryFilter);
+          }
+          if (cursor) params.set("cursor", cursor);
+          const response = await fetch(`/api/products?${params}`, {
             cache: "no-store",
             signal: controller.signal,
           });
           const data = await readResponse(response);
-          setProducts((current) => [...(data.products ?? []), ...current.filter(
-            (product) => !(data.products ?? []).some((listed: Product) => listed.id === product.id),
-          )]);
-          return;
-        }
-        const response = await fetch(
-          `/api/products?search=${encodeURIComponent(query)}&limit=100`,
-          { cache: "no-store", signal: controller.signal }
-        );
-        const data = await readResponse(response);
+          results.push(...(data.products ?? []));
+          cursor = typeof data.nextCursor === "string" ? data.nextCursor : null;
+        } while (cursor && !controller.signal.aborted);
+        if (controller.signal.aborted) return;
         setProducts((current) => {
-          const results: Product[] = data.products ?? [];
           const byId = new Map(current.map((product) => [product.id, product]));
           for (const product of results) byId.set(product.id, product);
           return [...byId.values()];
         });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
+        if (!navigator.onLine || err instanceof TypeError) {
+          try {
+            const cached = await getCachedEndpointCollection(
+              getOfflineAccountKey(userId, businessId),
+              "/api/products",
+              "products"
+            );
+            const localProducts = (cached as Product[])
+              .filter((product) => (product as Product & { isActive?: boolean }).isActive !== false)
+            .filter((product) => productCategoryFilter === "all" ||
+              product.categoryId === productCategoryFilter)
+            .filter((product) => filterInvoiceProducts(
+              [product],
+              "all",
+              productSearch
+            ).length > 0);
+            setProducts(localProducts);
+            setError("");
+            return;
+          } catch (cacheError) {
+            console.error("Offline product list load failed:", cacheError);
+          }
+        }
         setError(err instanceof Error ? err.message : "جست‌وجوی کالا انجام نشد.");
       }
     }, 200);
@@ -537,7 +723,39 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [modalOpen, productSearch]);
+  }, [modalOpen, productSearch, productCategoryFilter, userId, businessId]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/categories", {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = await readResponse(response);
+        const categories: ProductCategory[] = Array.isArray(data.categories)
+          ? data.categories
+          : [];
+        setProductCategories(categories);
+      } catch (categoryError) {
+        if (categoryError instanceof Error && categoryError.name === "AbortError") return;
+        try {
+          const cached = await getCachedEndpointCollection(
+            getOfflineAccountKey(userId, businessId),
+            "/api/categories",
+            "categories"
+          );
+          setProductCategories(cached as ProductCategory[]);
+        } catch (cacheError) {
+          console.error("Offline invoice categories could not be loaded:", cacheError);
+          setProductCategories([]);
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [modalOpen, userId, businessId]);
 
   useEffect(() => {
     if (!modalOpen) return;
@@ -558,13 +776,36 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
         });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
+        if (!navigator.onLine || err instanceof TypeError) {
+          try {
+            const cached = await getCachedEndpointCollection(
+              getOfflineAccountKey(userId, businessId),
+              "/api/contacts",
+              "contacts"
+            );
+            const requestedType = type === "PURCHASE" ? "SUPPLIER" : "CUSTOMER";
+            const query = debouncedContactSearch.trim().toLocaleLowerCase();
+            const localContacts = (cached as Contact[]).filter((contact) => {
+              const matchesType = contact.type === requestedType || contact.type === "BOTH";
+              return matchesType && (
+                !query || JSON.stringify(contact).toLocaleLowerCase().includes(query)
+              );
+            });
+            setContacts(localContacts);
+            setError("");
+            return;
+          } catch (cacheError) {
+            console.error("Offline contact list load failed:", cacheError);
+          }
+        }
         setError(err instanceof Error ? err.message : "دریافت طرف‌حساب‌ها ناموفق بود.");
       }
     })();
     return () => controller.abort();
-  }, [modalOpen, type, debouncedContactSearch, contactId]);
+  }, [modalOpen, type, debouncedContactSearch, contactId, userId, businessId]);
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
+    createInvoiceRequestRef.current = null;
     setContactId("");
     setDescription("");
     setExtraCosts("0");
@@ -579,13 +820,25 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
     setIssueImmediately(false);
     setInvoiceDate(toInvoiceDateObject(null));
     setEditingInvoice(null);
-  };
+  }, []);
 
-  const openNewInvoice = () => {
+  const openNewInvoice = useCallback(() => {
     resetForm();
     setContactSearch("");
     setModalOpen(true);
-  };
+  }, [resetForm]);
+
+  useEffect(() => {
+    if (
+      quickAction?.action === "invoice" &&
+      quickAction.requestId !== handledQuickActionRef.current &&
+      quickAction.targetView ===
+        (initialType === "PURCHASE" ? "purchase-invoices" : "sales-invoices")
+    ) {
+      handledQuickActionRef.current = quickAction.requestId;
+      queueMicrotask(openNewInvoice);
+    }
+  }, [quickAction?.requestId, quickAction?.action, quickAction?.targetView, initialType, openNewInvoice]);
 
   const openEditInvoice = async (invoice: Invoice) => {
     try {
@@ -704,9 +957,10 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
   };
   const confirmNegativeStock = () =>
     window.confirm("تعداد سفارش بیشتر از موجودی انبار است. آیا ادامه می‌دهید؟");
-  const matchingProducts = products.filter((product) =>
-    product.name.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase()) ||
-    product.sku?.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase())
+  const matchingProducts = filterInvoiceProducts(
+    products,
+    productCategoryFilter,
+    productSearch
   );
   const addProductToInvoice = (product: Product) => {
     const price = type === "PURCHASE" ? product.purchasePrice : product.salePrice;
@@ -832,13 +1086,6 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
 const detailGrossProfit = detailInvoice
   ? BigInt(detailInvoice.total) - detailCostOfGoodsSold
   : 0n;
-  const printEmptyRowCount = detailInvoice
-    ? Math.max(0, 28 - detailInvoice.items.length)
-    : 0;
-  const printDiscounts = detailInvoice
-    ? allocatePrintDiscount(BigInt(detailInvoice.discount), detailInvoice.items)
-    : [];
-
   const submitInvoice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
@@ -914,48 +1161,159 @@ const detailGrossProfit = detailInvoice
           : "مجموع روش‌های پرداخت بیشتر از مبلغ فاکتور است.");
       }
 
+      const requestBody = JSON.stringify(payload);
+      if (!editingInvoice) {
+        if (createInvoiceRequestRef.current?.body !== requestBody) {
+          createInvoiceRequestRef.current = {
+            key: crypto.randomUUID(),
+            body: requestBody,
+          };
+        }
+      }
+
+      const queueOfflineInvoice = async () => {
+        if (!createInvoiceRequestRef.current) {
+          throw new Error("کلید پایدار فاکتور آفلاین ساخته نشد.");
+        }
+        const id = `local-${crypto.randomUUID()}`;
+        const now = new Date().toISOString();
+        const localInvoice: Invoice = {
+          id,
+          offlineOperationId: createInvoiceRequestRef.current.key,
+          invoiceNumber: `OFFLINE-${id.slice(-8)}`,
+          type,
+          status: "DRAFT",
+          subtotal: validItems
+            .reduce((sum, item) => sum + lineAmount(item.quantity, item.unitPrice, currencyUnit), 0n)
+            .toString(),
+          extraCosts: (parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n).toString(),
+          discount: discountAmount.toString(),
+          discountPercent: normalizeDigits(discountPercent || "0"),
+          total: finalTotal.toString(),
+          description: description.trim() || null,
+          issuedAt: null,
+          invoiceDate: invoiceDateToDay(invoiceDate),
+          createdAt: now,
+          contact: contacts.find((contact) => contact.id === contactId) ?? null,
+          contactNameSnapshot: contactSnapshot.name.trim() || null,
+          contactPhoneSnapshot: contactSnapshot.phone.trim() || null,
+          contactAddressSnapshot: contactSnapshot.address.trim() || null,
+          items: validItems.map((item) => {
+            const product = products.find((entry) => entry.id === item.productId);
+            return {
+              productId: item.productId,
+              quantity: normalizeDigits(item.quantity),
+              unitPrice: (parseCurrencyAmount(item.unitPrice, currencyUnit) ?? 0n).toString(),
+              total: lineAmount(item.quantity, item.unitPrice, currencyUnit).toString(),
+              costOfGoodsSold: "0",
+              product: { name: product?.name ?? "کالای ذخیره‌شده", unit: product?.unit ?? "" },
+            };
+          }),
+          payments: payments.map((payment) => ({
+            method: payment.method,
+            amount: (payment.method === "LEDGER"
+              ? ledgerAmount
+              : parseCurrencyAmount(payment.amount, currencyUnit) ?? 0n
+            ).toString(),
+            description: payment.description || null,
+            status: "PENDING",
+            checkNumber: payment.checkNumber || null,
+            checkIssuedAt: payment.checkIssuedAt || null,
+            checkDueAt: payment.checkDueAt || null,
+            payableTo: payment.payableTo || null,
+            destinationDetails: payment.destinationDetails || null,
+          })),
+          offlineSyncStatus: "pending",
+          offlineSyncError: null,
+        };
+        const key = createInvoiceRequestRef.current.key;
+        await enqueueOfflineOperation(getOfflineAccountKey(userId, businessId), {
+          entityType: "invoice",
+          entityId: id,
+          idempotencyKey: key,
+          payload: {
+            path: "/api/invoices",
+            method: "POST",
+            body: payload,
+            localInvoice,
+          },
+        });
+        setSuccess("فاکتور فقط روی این دستگاه ذخیره شد؛ هنوز در سرور ثبت نهایی نشده است.");
+        setModalOpen(false);
+        createInvoiceRequestRef.current = null;
+        resetForm();
+        await loadData();
+        if (navigator.onLine) void syncOfflineOutbox(getOfflineAccountKey(userId, businessId));
+      };
+
+      if (!navigator.onLine && !editingInvoice) {
+        await queueOfflineInvoice();
+        return;
+      }
+
       if (issueImmediately && type === "SALE" && !editingInvoice) {
         const productIds = [...new Set(validItems.map((item) => item.productId))];
-        const productResponse = await fetch(
-          `/api/products?ids=${productIds.join(",")}`,
-          { cache: "no-store" },
-        );
-        const productData = await readResponse(productResponse);
-        const currentProducts: Product[] = productData.products ?? [];
-        setProducts((current) => {
-          const byId = new Map(current.map((product) => [product.id, product]));
-          for (const product of currentProducts) byId.set(product.id, product);
-          return [...byId.values()];
-        });
-        const shortages = getShortages(validItems, currentProducts);
-        if (shortages.length && !confirmNegativeStock()) return;
-      }
-
-      const response = await fetch(
-        editingInvoice
-          ? `/api/invoices/${editingInvoice.id}`
-          : "/api/invoices",
-        {
-          method: editingInvoice ? "PATCH" : "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      const saved = await readResponse(response);
-      if (issueImmediately && type === "SALE" && !editingInvoice) {
-        const issueResponse = await fetch(`/api/invoices/${saved.invoice.id}/issue`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
         try {
-          await readResponse(issueResponse);
-        } catch (issueError) {
-          await openEditInvoice(saved.invoice);
-          throw issueError;
+          const productResponse = await fetch(
+            `/api/products?ids=${productIds.join(",")}`,
+            { cache: "no-store" },
+          );
+          const productData = await readResponse(productResponse);
+          const currentProducts: Product[] = productData.products ?? [];
+          setProducts((current) => {
+            const byId = new Map(current.map((product) => [product.id, product]));
+            for (const product of currentProducts) byId.set(product.id, product);
+            return [...byId.values()];
+          });
+          const shortages = getShortages(validItems, currentProducts);
+          if (shortages.length && !confirmNegativeStock()) return;
+        } catch (preflightError) {
+          if (!navigator.onLine) {
+            await queueOfflineInvoice();
+            return;
+          }
+          throw preflightError;
         }
       }
+
+      const requestHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (!editingInvoice) {
+        if (createInvoiceRequestRef.current?.body !== requestBody) {
+          createInvoiceRequestRef.current = {
+            key: crypto.randomUUID(),
+            body: requestBody,
+          };
+        }
+        requestHeaders["Idempotency-Key"] = createInvoiceRequestRef.current.key;
+      }
+
+      let response: Response;
+      try {
+        response = await fetch(
+          editingInvoice
+            ? `/api/invoices/${editingInvoice.id}`
+            : "/api/invoices",
+          {
+            method: editingInvoice ? "PATCH" : "POST",
+            headers: requestHeaders,
+            body: requestBody,
+          }
+        );
+      } catch (networkError) {
+        if (!editingInvoice && networkError instanceof TypeError) {
+          await queueOfflineInvoice();
+          return;
+        }
+        throw networkError;
+      }
+      if (!editingInvoice && response.status >= 500) {
+        await queueOfflineInvoice();
+        return;
+      }
+
+      await readResponse(response);
       setSuccess(
         editingInvoice?.status === "ISSUED"
           ? "فاکتور صادرشده ویرایش شد."
@@ -967,6 +1325,7 @@ const detailGrossProfit = detailInvoice
               ? "فاکتور فروش مستقیماً صادر شد."
               : "پیش‌نویس فاکتور ثبت شد.",
       );
+      createInvoiceRequestRef.current = null;
       setModalOpen(false);
       resetForm();
       await loadData();
@@ -1241,6 +1600,22 @@ const detailGrossProfit = detailInvoice
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#263341] bg-[#111820] px-4 py-3 text-xs text-slate-300">
+        <span className={isOnline ? "text-green-400" : "text-amber-400"}>
+          {isOnline ? "آنلاین" : "آفلاین"}
+        </span>
+        <span>
+          {outboxCount === null
+            ? "صف آفلاین قفل است"
+            : `${outboxCount} عملیات در انتظار همگام‌سازی`}
+        </span>
+        {!isOnline && (
+          <span className="text-amber-300">
+            فاکتورهای جدید فقط محلی ذخیره می‌شوند و تا تأیید سرور نهایی نیستند.
+          </span>
+        )}
+      </div>
+
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1">
           <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500" size={18} />
@@ -1372,6 +1747,17 @@ const detailGrossProfit = detailInvoice
                   <tr key={invoice.id} className="border-t border-[#263341] hover:bg-white/[0.02]">
                     <td className="px-5 py-4 font-semibold text-white" dir="ltr">
                       {invoice.invoiceNumber}
+                      {invoice.offlineSyncStatus && (
+                        <span className="mt-1 block text-xs font-normal text-amber-300" dir="rtl">
+                          شماره موقت · {invoice.offlineSyncStatus === "pending"
+                            ? "در انتظار همگام‌سازی"
+                            : invoice.offlineSyncStatus === "syncing"
+                              ? "در حال ارسال"
+                              : invoice.offlineSyncStatus === "failed"
+                                ? "ناموفق"
+                                : "در حال دریافت تأیید"}
+                        </span>
+                      )}
                       {invoice.type === "SALE" && (invoice.reference || invoice.referenceNumber) && (
                         <span className="mt-1 block text-xs font-normal text-slate-400" dir="rtl">
                           مرجع: {[invoice.reference, invoice.referenceNumber].filter(Boolean).join(" · ")}
@@ -1389,19 +1775,50 @@ const detailGrossProfit = detailInvoice
                     </td>
                     <td className="px-5 py-4">
                       <span className={`rounded-lg px-3 py-1.5 text-xs ${statusClass(invoice.status)}`}>
-                        {statusLabel(invoice.status)}
+                        {invoice.offlineSyncStatus
+                          ? invoice.offlineSyncStatus === "pending"
+                            ? "در انتظار همگام‌سازی"
+                            : invoice.offlineSyncStatus === "syncing"
+                              ? "در حال ارسال"
+                              : invoice.offlineSyncStatus === "failed"
+                                ? "ناموفق"
+                                : "در حال تأیید"
+                          : statusLabel(invoice.status)}
                       </span>
+                      {invoice.offlineSyncError && (
+                        <p className="mt-2 max-w-56 text-xs text-red-300" role="alert">
+                          {invoice.offlineSyncError}
+                        </p>
+                      )}
+                      {invoice.offlineSyncStatus === "failed" && (
+                        <button
+                          type="button"
+                          className="mt-2 rounded-md bg-amber-500/10 px-2 py-1 text-xs text-amber-300"
+                          onClick={() => {
+                            const account = getOfflineAccountKey(userId, businessId);
+                            if (!invoice.offlineOperationId) return;
+                            void updateOfflineOutboxOperation(invoice.offlineOperationId, account, {
+                              status: "pending",
+                              nextAttemptAt: new Date().toISOString(),
+                            }).then(() => syncOfflineOutbox(account)).catch((retryError: unknown) => {
+                              console.error("Manual invoice retry failed:", retryError);
+                            });
+                          }}
+                        >
+                          تلاش دوباره
+                        </button>
+                      )}
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-2">
-                        <button
+                        {!invoice.offlineSyncStatus && <button
                           title="مشاهده"
                           onClick={() => void showDetails(invoice)}
                           className="rounded-lg p-2 text-slate-400 hover:bg-white/5 hover:text-white"
                         >
                           <Eye size={17} />
-                        </button>
-                        {invoice.status === "DRAFT" && (
+                        </button>}
+                        {!invoice.offlineSyncStatus && invoice.status === "DRAFT" && (
                           <>
                             <button
                               title="ویرایش"
@@ -1428,7 +1845,7 @@ const detailGrossProfit = detailInvoice
                             </button>}
                           </>
                         )}
-                        {invoice.status === "ISSUED" && (
+                        {!invoice.offlineSyncStatus && invoice.status === "ISSUED" && (
                           <button
                             title="ویرایش فاکتور صادرشده"
                             onClick={() => void openEditInvoice(invoice)}
@@ -1437,7 +1854,7 @@ const detailGrossProfit = detailInvoice
                             <Pencil size={17} />
                           </button>
                         )}
-                        {invoice.status === "ISSUED" && (
+                        {!invoice.offlineSyncStatus && invoice.status === "ISSUED" && (
                           <button
                             title="لغو فاکتور"
                             disabled={saving}
@@ -1515,6 +1932,23 @@ const detailGrossProfit = detailInvoice
                     placeholder="نام یا کد کالا..."
                     className="mb-3 w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none focus:border-green-500"
                   />
+                  <select
+                    value={productCategoryFilter}
+                    onChange={(event) => setProductCategoryFilter(event.target.value)}
+                    aria-label="دسته‌بندی کالا"
+                    className="mb-2 w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none focus:border-green-500"
+                  >
+                    <option value="all">همه دسته‌بندی‌ها</option>
+                    {productCategories.map((category) => (
+                      <option key={category.id} value={category.id}>
+                        {category.name}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="mb-3 flex flex-wrap justify-between gap-2 text-[11px] text-slate-400">
+                    <span>کالاهای نمایش‌داده‌شده: {moneyFormat.format(matchingProducts.length)} قلم</span>
+                    <span>اقلام انتخاب‌شده: {moneyFormat.format(countInvoiceItemRows(items))} قلم</span>
+                  </div>
                   <div className="grid max-h-[60vh] grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2 lg:max-h-none">
                     {matchingProducts.map((product) => (
                       <button
@@ -1640,7 +2074,9 @@ const detailGrossProfit = detailInvoice
 
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h4 className="font-bold text-white">اقلام فاکتور</h4>
+                  <h4 className="font-bold text-white">
+                    اقلام فاکتور · تعداد اقلام: {moneyFormat.format(countInvoiceItemRows(items))} قلم
+                  </h4>
                   <button type="button" onClick={addItem} className="flex items-center gap-1 rounded-lg bg-green-500/10 px-3 py-2 text-xs font-bold text-green-400 hover:bg-green-500/20">
                     <Plus size={15} />
                     افزودن کالا
@@ -2011,6 +2447,9 @@ const detailGrossProfit = detailInvoice
               )}
 
               <div className="overflow-x-auto rounded-xl border border-[#263341]">
+                <p className="px-3 pt-3 text-xs text-slate-400">
+                  تعداد اقلام فاکتور: {moneyFormat.format(detailInvoice.items.length)} قلم
+                </p>
                 <table className="w-full min-w-[560px] text-sm">
                   <thead className="bg-[#0d141c] text-xs text-slate-500">
                     <tr>
@@ -2099,6 +2538,9 @@ const detailGrossProfit = detailInvoice
                         <span>{formatInvoiceDate(invoiceReturn.createdAt)}</span>
                         <strong>{formatMoney(invoiceReturn.total, currencyUnit)}</strong>
                       </div>
+                      <p className="mt-1 text-xs text-slate-400">
+                        تعداد اقلام مرجوعی: {moneyFormat.format(invoiceReturn.items.length)} قلم
+                      </p>
                       {invoiceReturn.items.map((item) => (
                         <p key={item.id} className="mt-1 text-xs text-slate-500">
                           {item.product.name}: {formatQuantity(item.quantity)} {item.product.unit}
@@ -2152,69 +2594,10 @@ const detailGrossProfit = detailInvoice
                 </section>
               )}
             </div>
-            {printContainer && createPortal(<section className="print-only print-invoice-root" dir="rtl">
-              <header className="print-invoice-header">
-                <div>
-                  <h1>{detailInvoice.type === "SALE" ? "فاکتور فروش" : "فاکتور خرید"}</h1>
-                </div>
-                <div className="print-invoice-brand">
-                  <strong>هیراد اکانتینگ</strong>
-                  <p>{detailInvoice.business?.name ?? "—"}</p>
-                </div>
-                <div className="print-invoice-meta">
-                  <p>شماره فاکتور: {detailInvoice.invoiceNumber.replace(/\d/g, (digit) => "۰۱۲۳۴۵۶۷۸۹"[Number(digit)])}</p>
-                  <p>تاریخ: {formatInvoiceDate(detailInvoice.invoiceDate ?? detailInvoice.issuedAt ?? detailInvoice.createdAt)}</p>
-                  <p>{detailInvoice.type === "SALE" ? "خریدار" : "فروشنده"}: {detailInvoice.contact?.name ?? detailInvoice.contactNameSnapshot ?? "—"}</p>
-                </div>
-              </header>
-              <table className="print-invoice-table">
-                <thead>
-                  <tr>
-                    <th>ردیف</th><th>نام کالا</th><th>تعداد</th><th>قیمت واحد</th><th>تخفیف</th><th>جمع ردیف</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detailInvoice.items.map((item, index) => (
-                    <tr key={item.id ?? index}>
-                      <td>{moneyFormat.format(index + 1)}</td>
-                      <td>{item.product?.name ?? "کالا"}</td>
-                      <td>{formatQuantity(item.quantity)}</td>
-                      <td>{formatMoney(item.unitPrice, currencyUnit)}</td>
-                      <td>{formatMoney(printDiscounts[index]?.toString() ?? "0", currencyUnit)}</td>
-                      <td>{formatMoney(item.total ?? "0", currencyUnit)}</td>
-                    </tr>
-                  ))}
-                  {Array.from({ length: printEmptyRowCount }, (_, index) => (
-                    <tr key={`print-empty-${index}`} className="print-invoice-empty-row">
-                      <td>{moneyFormat.format(detailInvoice.items.length + index + 1)}</td>
-                      <td></td>
-                      <td></td>
-                      <td></td>
-                      <td></td>
-                      <td></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="print-invoice-bottom">
-                {detailInvoice.description && <p className="print-invoice-description">توضیحات: {detailInvoice.description}</p>}
-                <div className="print-invoice-totals">
-                  <p>
-                    تخفیف{detailInvoice.discountPercent !== null && detailInvoice.discountPercent !== undefined
-                      ? ` (${formatDiscountPercent(detailInvoice.discountPercent)})`
-                      : ""}: {formatMoney(detailInvoice.discount, currencyUnit)}
-                  </p>
-                  <strong>مبلغ نهایی: {formatMoney(detailInvoice.total, currencyUnit)}</strong>
-                </div>
-                <footer className="print-invoice-footer">
-                  <div className="print-invoice-signatures">
-                    <span>امضای {detailInvoice.type === "SALE" ? "خریدار" : "فروشنده"}</span>
-                    <span>امضای {detailInvoice.type === "SALE" ? "فروشنده" : "خریدار"}</span>
-                  </div>
-                  <p className="print-invoice-thanks">ممنون از خرید شما</p>
-                </footer>
-              </div>
-            </section>, printContainer)}
+            {detailInvoice && typeof document !== "undefined" && createPortal(
+              <InvoicePrintView invoice={detailInvoice} />,
+              document.body,
+            )}
 
               {returnModalOpen && detailInvoice?.status === "ISSUED" && (
                 <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-hidden bg-black/80 p-4 backdrop-blur-sm">
@@ -2229,6 +2612,11 @@ const detailGrossProfit = detailInvoice
                       </button>
                     </div>
                     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+                      <p className="text-xs text-slate-400">
+                        تعداد اقلام قابل مرجوعی: {moneyFormat.format(detailInvoice.items.filter((item) =>
+                          item.id && remainingReturnQuantity(detailInvoice, item.id) > 0n
+                        ).length)} قلم
+                      </p>
                       {detailInvoice.items.map((item) => {
                         const available = item.id ? remainingReturnQuantity(detailInvoice, item.id) : 0n;
                         if (available <= 0n) return null;

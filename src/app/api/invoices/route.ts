@@ -1,5 +1,6 @@
 
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
@@ -10,11 +11,13 @@ import {
   parseCursorPageParams,
 } from "@/lib/cursor-pagination";
 import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
+import { issueInvoiceInTransaction } from "@/lib/issue-invoice-transaction";
 
 const amountSchema = z.string().regex(/^\d{1,18}(\.\d)?$/);
 
 const invoiceSchema = z.object({
   type: z.enum(["PURCHASE", "SALE"]),
+  issueImmediately: z.boolean().optional().default(false),
   invoiceDate: z.string().date().optional(),
   contactId: z.string().nullable().optional(),
   contactSnapshot: z.object({
@@ -363,6 +366,9 @@ export async function GET(request: NextRequest) {
 }
 // ایجاد پیش‌نویس فاکتور
 export async function POST(request: NextRequest) {
+  let requestBusinessId: string | null = null;
+  let idempotencyKey: string | null = null;
+  let idempotencyRequestHash: string | null = null;
   try {
     const user = await getCurrentUser();
     const auth = authorize(user);
@@ -383,6 +389,46 @@ export async function POST(request: NextRequest) {
     }
 
     const data = validation.data;
+    requestBusinessId = auth.businessId;
+    idempotencyKey = request.headers.get("Idempotency-Key")?.trim() || null;
+    if (idempotencyKey && (idempotencyKey.length < 16 || idempotencyKey.length > 128)) {
+      return NextResponse.json(
+        { message: "کلید جلوگیری از ثبت تکراری معتبر نیست." },
+        { status: 400 }
+      );
+    }
+    if (idempotencyKey) {
+      idempotencyRequestHash = createHash("sha256")
+        .update(JSON.stringify(data))
+        .digest("hex");
+      const existing = await prisma.invoice.findUnique({
+        where: {
+          businessId_idempotencyKey: {
+            businessId: auth.businessId,
+            idempotencyKey,
+          },
+        },
+        include: {
+          contact: { select: { id: true, name: true } },
+          items: { include: { product: { select: { name: true, unit: true } } } },
+        },
+      });
+      if (existing) {
+        if (existing.idempotencyRequestHash !== idempotencyRequestHash) {
+          return NextResponse.json(
+            { message: "این کلید ثبت قبلاً برای اطلاعات دیگری استفاده شده است." },
+            { status: 409 }
+          );
+        }
+        return NextResponse.json(
+          {
+            message: "این فاکتور قبلاً ثبت شده است.",
+            invoice: serializeInvoice(existing),
+          },
+          { status: 200 }
+        );
+      }
+    }
     if (
       data.payments.length < expectedPaymentMethods.length ||
       data.payments.length > expectedPaymentMethods.length + 1 ||
@@ -392,6 +438,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "چهار روش پرداخت واقعی باید با مبلغ مشخص ارسال شوند و روش حساب دفتری اختیاری است." }, { status: 400 });
     }
     const businessId = auth.businessId;
+    requestBusinessId = businessId;
 
     const business = await prisma.business.findUnique({
       where: { id: businessId },
@@ -546,6 +593,7 @@ export async function POST(request: NextRequest) {
       const created = await tx.invoice.create({
         data: {
         businessId,
+        ...(idempotencyKey ? { idempotencyKey, idempotencyRequestHash } : {}),
         contactId: data.contactId || null,
         contactNameSnapshot: contactSnapshot?.name ?? null,
         contactPhoneSnapshot: contactSnapshot?.phone ?? null,
@@ -712,6 +760,8 @@ export async function POST(request: NextRequest) {
           where: { invoiceId: created.id, businessId, status: "PENDING" },
           data: { status: "CONFIRMED" },
         });
+      } else if (data.issueImmediately) {
+        await issueInvoiceInTransaction(tx, businessId, created.id);
       }
 
       return tx.invoice.findFirstOrThrow({
@@ -731,12 +781,103 @@ export async function POST(request: NextRequest) {
       {
         message: data.type === "PURCHASE"
           ? "فاکتور خرید با موفقیت صادر شد."
-          : "پیش‌نویس فاکتور با موفقیت ایجاد شد.",
+          : data.issueImmediately
+            ? "فاکتور فروش با موفقیت صادر شد."
+            : "پیش‌نویس فاکتور با موفقیت ایجاد شد.",
         invoice: serializeInvoice(invoice),
       },
       { status: 201 }
     );
   } catch (error) {
+    if (error instanceof Error) {
+      const issuanceErrors: Record<string, { message: string; status: number }> = {
+        INVOICE_EMPTY: { message: "فاکتور هیچ کالایی ندارد.", status: 400 },
+        INVOICE_ITEM_PRICE_REQUIRED: {
+          message: "برای صدور فاکتور، قیمت واحد همه کالاها باید بیشتر از صفر باشد.",
+          status: 400,
+        },
+        PRODUCT_NOT_FOUND: {
+          message: "یک یا چند کالا دیگر معتبر یا فعال نیستند.",
+          status: 400,
+        },
+        PAYMENTS_NOT_EQUAL: {
+          message: "مجموع روش‌های پرداخت باید دقیقاً با مبلغ فاکتور برابر باشد.",
+          status: 400,
+        },
+        CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT: {
+          message: "برای ثبت بدهی یا چک تسویه‌نشده، مشتری دارای حساب را انتخاب کنید.",
+          status: 400,
+        },
+        INVALID_PURCHASE_TOTAL: {
+          message: "مبلغ کل اقلام فاکتور خرید معتبر نیست.",
+          status: 400,
+        },
+        INVALID_PURCHASE_DISCOUNT: {
+          message: "تخفیف فاکتور خرید نمی‌تواند از مبلغ اقلام بیشتر باشد.",
+          status: 400,
+        },
+        INVALID_ACQUISITION_COST: {
+          message: "بهای تمام‌شده خرید نمی‌تواند منفی باشد.",
+          status: 400,
+        },
+        INVALID_ALLOCATION: {
+          message: "تقسیم هزینه بین اقلام فاکتور امکان‌پذیر نیست.",
+          status: 400,
+        },
+        INVENTORY_VALUE_OVERFLOW: {
+          message: "ارزش موجودی از محدوده مجاز سامانه بیشتر است.",
+          status: 400,
+        },
+        STOCK_CONFLICT: {
+          message: "موجودی هم‌زمان تغییر کرده است. دوباره تلاش کنید.",
+          status: 409,
+        },
+      };
+      const known = issuanceErrors[error.message];
+      if (known) {
+        return NextResponse.json({ message: known.message }, { status: known.status });
+      }
+    }
+    if (
+      idempotencyKey &&
+      requestBusinessId &&
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      (error.code === "P2002" || error.code === "P2034")
+    ) {
+      const existing = await prisma.invoice.findUnique({
+        where: {
+          businessId_idempotencyKey: {
+            businessId: requestBusinessId,
+            idempotencyKey,
+          },
+        },
+        include: {
+          contact: { select: { id: true, name: true } },
+          items: { include: { product: { select: { name: true, unit: true } } } },
+        },
+      });
+      if (existing && existing.idempotencyRequestHash === idempotencyRequestHash) {
+        return NextResponse.json(
+          {
+            message: "این فاکتور قبلاً ثبت شده است.",
+            invoice: serializeInvoice(existing),
+          },
+          { status: 200 }
+        );
+      }
+      if (existing) {
+        return NextResponse.json(
+          { message: "این کلید ثبت قبلاً برای اطلاعات دیگری استفاده شده است." },
+          { status: 409 }
+        );
+      }
+      if (error.code === "P2034") {
+        return NextResponse.json(
+          { message: "تداخل هم‌زمان رخ داد؛ همین عملیات را با همان کلید دوباره ارسال کنید." },
+          { status: 503, headers: { "Retry-After": "2" } }
+        );
+      }
+    }
     if (error instanceof Error && error.message === "INVALID_QUANTITY") {
       return NextResponse.json(
         { message: "تعداد کالا باید بیشتر از صفر باشد." },

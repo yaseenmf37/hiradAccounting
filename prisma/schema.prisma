@@ -131,6 +131,8 @@ enum ContactType {
 model Invoice {
   id                     String              @id @default(cuid())
   businessId             String
+  idempotencyKey         String?
+  idempotencyRequestHash String?
   contactId              String?
   type                   InvoiceType
   status                 InvoiceStatus       @default(DRAFT)
@@ -163,6 +165,7 @@ model Invoice {
   paymentPlanRecorded    Boolean             @default(false)
 
   @@unique([businessId, invoiceNumber])
+  @@unique([businessId, idempotencyKey])
   @@unique([id, businessId])
   @@index([businessId, type, createdAt])
 }

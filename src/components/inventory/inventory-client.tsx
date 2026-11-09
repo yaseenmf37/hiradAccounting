@@ -744,7 +744,8 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
           <div>
             <h2 className="font-bold text-white">فهرست کالاها</h2>
             <p className="mt-1 text-xs text-slate-500">
-              {formatNumber(productTotal)} کالا
+              تعداد اقلام این صفحه: {formatNumber(filteredProducts.length)} قلم
+              {" · "}در فهرست: {formatNumber(productTotal)} قلم
             </p>
           </div>
           <button
@@ -753,7 +754,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
             onClick={() => setBulkPriceOpen(true)}
             className="rounded-lg border border-green-500/30 px-3 py-2 text-xs text-green-400 disabled:opacity-40"
           >
-            افزایش قیمت انتخاب‌شده‌ها ({formatNumber(selectedProductIds.length)})
+            افزایش قیمت انتخاب‌شده‌ها ({formatNumber(selectedProductIds.length)} قلم)
           </button>
         </div>
 
@@ -969,6 +970,9 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
               درصد افزایش
               <NumericInput min="0.01" max="999.99" step="0.01" value={bulkPercent} onChange={(event) => setBulkPercent(event.target.value)} onFocus={(event) => event.currentTarget.select()} className={inputClass} />
             </label>
+            <p className="text-xs text-slate-400">
+              تعداد اقلام انتخاب‌شده: {formatNumber(bulkPricePreview.length)} قلم
+            </p>
             <div className="max-h-60 overflow-y-auto rounded-xl border border-[#293642]">
               <table className="w-full text-right text-xs">
                 <thead><tr className="text-slate-500"><th className="p-3">کالا</th><th className="p-3">قیمت فعلی</th><th className="p-3">قیمت جدید</th></tr></thead>
@@ -996,7 +1000,10 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
         <div className="rounded-2xl border border-amber-500/20 bg-[#111820]">
           <div className="border-b border-[#222d38] p-5">
             <h2 className="font-bold text-white">کسری موجودی</h2>
-            <p className="mt-1 text-xs text-slate-400">کالاهایی که موجودی انبارشان منفی است نمایش داده می‌شوند؛ با ورود موجودی، مقدار کسری به‌طور خودکار کاهش می‌یابد. {formatNumber(backorderTotal)} کالا</p>
+            <p className="mt-1 text-xs text-slate-400">
+              کالاهایی که موجودی انبارشان منفی است نمایش داده می‌شوند؛ با ورود موجودی، مقدار کسری به‌طور خودکار کاهش می‌یابد.
+              {" "}تعداد اقلام این صفحه: {formatNumber(backorders.length)} قلم از {formatNumber(backorderTotal)} قلم
+            </p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[520px] text-right text-sm">

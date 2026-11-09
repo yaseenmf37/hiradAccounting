@@ -74,8 +74,15 @@ button {
     width: 100%;
     padding: 0;
     color: #111 !important;
-    background: white !important;
+    background: #fff !important;
     font: 12px Tahoma, Arial, sans-serif;
+  }
+
+  .print-invoice-root,
+  .print-invoice-root * {
+    color: #111 !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
   }
 
   body.printing-invoice > .print-invoice-root {
@@ -87,38 +94,63 @@ button {
     display: flex;
     flex-direction: column;
     padding: 9mm;
+    background: #fff !important;
   }
 
-  .print-only h1 {
-    margin: 0 0 12px;
-    font-size: 20px;
+  .print-invoice-title {
+    margin: 0 0 5px;
+    text-align: center;
+    font-size: 15px;
   }
 
   .print-invoice-header {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
     align-items: flex-start;
     gap: 12px;
-    padding-bottom: 6px;
+    padding-bottom: 8px;
     border-bottom: 2px solid #222;
+  }
+
+  .print-invoice-header-column {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .print-invoice-seller {
+    text-align: right;
   }
 
   .print-invoice-brand {
     text-align: center;
   }
 
-  .print-invoice-brand p {
-    margin: 3px 0 0;
+  .print-invoice-brand strong {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 18px;
+    line-height: 1.5;
+  }
+
+  .print-invoice-meta {
+    text-align: left;
   }
 
   .print-invoice-header p,
   .print-invoice-meta p,
   .print-invoice-totals p {
-    margin: 2px 0;
+    margin: 3px 0;
+    line-height: 1.45;
   }
 
   .print-invoice-table thead {
     display: table-header-group;
+  }
+
+  .print-invoice-table caption {
+    padding: 5px 0 2px;
+    text-align: right;
+    caption-side: top;
   }
 
   .print-invoice-table tr {
@@ -128,7 +160,7 @@ button {
 
   .print-invoice-table {
     width: 100%;
-    margin-top: 8px;
+    margin-top: 4px;
     border-collapse: collapse;
   }
 
@@ -138,15 +170,17 @@ button {
 
   .print-invoice-table th,
   .print-invoice-table td {
-    padding: 2px 6px;
+    padding: 1mm 2mm;
     border: 1px solid #777;
     text-align: right;
-    line-height: 1.2;
+    line-height: 1.15;
+    font-size: 10px;
   }
 
   .print-invoice-table th {
     background: #eee !important;
     print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
   }
 
   .print-invoice-totals {
@@ -166,21 +200,20 @@ button {
     font-size: 14px;
   }
 
-  .print-invoice-description {
-    margin: 4px 0 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .print-invoice-total-words {
+    font-weight: bold;
+    overflow-wrap: anywhere;
   }
 
   .print-invoice-empty-row td {
-    height: 6.5mm;
+    height: 4mm;
   }
 
   .print-invoice-signatures {
     display: flex;
     justify-content: space-between;
-    margin-top: 0;
+    gap: 12mm;
+    margin-top: 8mm;
   }
 
   .print-invoice-footer {

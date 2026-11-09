@@ -1,13 +1,17 @@
 
-import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { prisma } from "../src/lib/prisma";
+import { configureDevelopmentDatabaseEnvironment } from "./development-database-env.mjs";
 
-const rl = createInterface({ input: stdin, output: stdout });
+configureDevelopmentDatabaseEnvironment({ forceDevelopment: true });
+
+// const rl = createInterface({ input: stdin, output: stdout });
 
 async function main() {
+  const { prisma } = await import("../src/lib/prisma");
+  const rl = createInterface({ input: stdin, output: stdout });
+
   try {
     const username = (await rl.question("Admin username: ")).trim();
     const fullName = (await rl.question("Admin full name: ")).trim();

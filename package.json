@@ -4,10 +4,18 @@
   "private": true,
   "scripts": {
     "postinstall": "prisma generate",
+    "predev": "node scripts/development-database-env.mjs",
     "dev": "next dev",
+    "db:check:dev": "node scripts/development-database-env.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:offline-security": "tsx --test tests/offline-storage-security.test.mjs",
+    "test:offline-bootstrap": "tsx --test tests/offline-category-bootstrap.test.mjs",
+    "test:offline-lifecycle": "tsx --test tests/offline-unlock-lifecycle.test.mjs",
+    "test:db-env": "node --test tests/development-database-env.test.mjs",
+    "test:invoice-presentation": "tsx --test tests/invoice-presentation.test.mjs",
+    "test:invoice-print": "tsx --test tests/invoice-print.test.mjs",
     "create-admin": "tsx scripts/create-admin.ts"
   },
   "dependencies": {
@@ -31,6 +39,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.4",
+    "fake-indexeddb": "^6.2.8",
     "prisma": "^6.19.3",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",

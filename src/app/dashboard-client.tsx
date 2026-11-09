@@ -29,6 +29,15 @@ import {
 import { useEffect, useState } from "react";
 import type { ElementType } from "react";
 import type { QuickAction } from "@/lib/quick-actions";
+import {
+  bootstrapOfflineWorkspace,
+  configureOfflineWorkspace,
+  changeOfflineUnlockCredential,
+  getOfflineAccountKey,
+  isOfflineWorkspaceUnlocked,
+  lockOfflineWorkspace,
+} from "@/lib/offline-storage";
+import { syncOfflineOutbox } from "@/lib/offline-outbox-sync";
 
 function SectionLoading() {
   return (
@@ -265,9 +274,11 @@ function getInvoiceStatus(
 export default function DashboardClient({
   user,
   initialView,
+  offlineWorkspace = false,
 }: {
   user: DashboardUser;
   initialView: CurrentView;
+  offlineWorkspace?: boolean;
 }) {
   const router = useRouter();
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
@@ -330,19 +341,85 @@ export default function DashboardClient({
   }
 
   useEffect(() => {
+    const business = user.business;
+    if (!business) return;
+
+    configureOfflineWorkspace({
+      userId: user.id,
+      businessId: business.id,
+      businessName: business.name,
+    });
+
     const controller = new AbortController();
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) loadDashboard(controller.signal);
+    });
 
-    loadDashboard(controller.signal);
+    const bootstrap = () => {
+      const account = getOfflineAccountKey(user.id, business.id);
+      if (!navigator.onLine || !isOfflineWorkspaceUnlocked(account)) return;
+      void bootstrapOfflineWorkspace(
+        account
+      ).catch((error: unknown) => {
+        console.error("Offline snapshot bootstrap failed:", error);
+      });
+      void syncOfflineOutbox(account).catch(
+        (error: unknown) => {
+          console.error("Offline operation synchronization failed:", error);
+        }
+      );
+    };
+    bootstrap();
+    window.addEventListener("online", bootstrap);
+    window.addEventListener("hirad-offline-workspace-unlocked", bootstrap);
+    const refreshAfterSync = () => {
+      if (!navigator.onLine) return;
+      bootstrap();
+      queueMicrotask(() => {
+        if (!controller.signal.aborted) loadDashboard(controller.signal);
+      });
+    };
+    window.addEventListener("hirad-offline-sync-succeeded", refreshAfterSync);
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") bootstrap();
+    };
+    document.addEventListener("visibilitychange", syncWhenVisible);
 
-    return () => controller.abort();
-  }, []);
+    return () => {
+      controller.abort();
+      window.removeEventListener("online", bootstrap);
+      window.removeEventListener("hirad-offline-workspace-unlocked", bootstrap);
+      window.removeEventListener("hirad-offline-sync-succeeded", refreshAfterSync);
+      document.removeEventListener("visibilitychange", syncWhenVisible);
+    };
+  }, [user.id, user.business]);
 
   useEffect(() => {
-    setCurrentView(initialView);
-    setVisitedViews((previous) =>
-      previous.includes(initialView) ? previous : [...previous, initialView]
-    );
+    queueMicrotask(() => {
+      setCurrentView(initialView);
+      setVisitedViews((previous) =>
+        previous.includes(initialView) ? previous : [...previous, initialView]
+      );
+    });
   }, [initialView]);
+
+  useEffect(() => {
+    const business = user.business;
+    if (offlineWorkspace || !business) return;
+    const account = getOfflineAccountKey(user.id, business.id);
+    const handleWorkspaceLock = (event: Event) => {
+      const lockedAccount = (event as CustomEvent<{ account?: string }>).detail?.account;
+      if (lockedAccount !== account) return;
+      router.replace("/login");
+      router.refresh();
+    };
+    window.addEventListener("hirad-offline-workspace-locked", handleWorkspaceLock);
+    return () =>
+      window.removeEventListener(
+        "hirad-offline-workspace-locked",
+        handleWorkspaceLock
+      );
+  }, [offlineWorkspace, router, user.business, user.id]);
 
   useEffect(() => {
     if (!mobileMenuOpen) return;
@@ -393,13 +470,34 @@ export default function DashboardClient({
         throw new Error(data.error || "تغییر رمز عبور ناموفق بود.");
       }
 
+      let localCredentialUpdated = false;
+      if (user.business) {
+        try {
+          localCredentialUpdated = await changeOfflineUnlockCredential(
+            user.id,
+            user.business.id,
+            passwordForm.currentPassword,
+            passwordForm.newPassword
+          );
+        } catch (offlineCredentialError) {
+          console.error(
+            "Offline encryption key password rotation failed:",
+            offlineCredentialError
+          );
+        }
+      }
+
       setPasswordForm({
         currentPassword: "",
         newPassword: "",
         confirmPassword: "",
       });
 
-      setPasswordSuccess("رمز عبور با موفقیت تغییر کرد.");
+      setPasswordSuccess(
+        localCredentialUpdated
+          ? "رمز عبور و قفل فضای آفلاین با موفقیت تغییر کردند."
+          : "رمز حساب تغییر کرد، اما قفل آفلاین به‌روزرسانی نشد. برای بازکردن اطلاعات محلی از رمز قبلی استفاده کنید و پس از ورود دوباره اقدام کنید."
+      );
     } catch (error) {
       setPasswordError(
         error instanceof Error
@@ -412,13 +510,31 @@ export default function DashboardClient({
   }
 
   async function handleLogout() {
-    const response = await fetch("/api/auth/logout", {
-      method: "POST",
-    });
+    let response: Response;
+    try {
+      response = await fetch("/api/auth/logout", { method: "POST" });
+    } catch (error) {
+      console.error("Server logout failed:", error);
+      window.alert(
+        "برای باطل‌کردن نشست سرور اتصال اینترنت لازم است. عملیات همگام‌نشده حفظ شده‌اند."
+      );
+      return;
+    }
 
     if (response.ok) {
+      if (user.business) {
+        lockOfflineWorkspace(user.id, user.business.id);
+      }
       window.location.href = "/login";
+      return;
     }
+
+    const data = await response.json().catch(() => null);
+    window.alert(
+      typeof data?.message === "string"
+        ? data.message
+        : "خروج از حساب ناموفق بود؛ نشست سرور هنوز باطل نشده است."
+    );
   }
 
   function navigateTo(view: CurrentView, action?: QuickAction["action"]) {
@@ -427,7 +543,10 @@ export default function DashboardClient({
     setVisitedViews((previous) =>
       previous.includes(view) ? previous : [...previous, view]
     );
-    if (window.location.search !== `?view=${encodeURIComponent(view)}`) {
+    if (
+      !offlineWorkspace &&
+      window.location.search !== `?view=${encodeURIComponent(view)}`
+    ) {
       router.push(`/?view=${encodeURIComponent(view)}`, { scroll: false });
     }
     if (action && view !== "dashboard" && view !== "reports") {
@@ -699,6 +818,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "purchase-invoices"}>
               <InvoicesClient
                 key="PURCHASE"
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 currencyUnit={currencyUnit}
                 initialType="PURCHASE"
                 quickAction={
@@ -715,6 +836,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "sales-invoices"}>
               <InvoicesClient
                 key="SALE"
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 currencyUnit={currencyUnit}
                 initialType="SALE"
                 quickAction={

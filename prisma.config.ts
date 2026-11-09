@@ -1,6 +1,8 @@
 
-import "dotenv/config";
 import { defineConfig, env } from "prisma/config";
+import { configureDevelopmentDatabaseEnvironment } from "./scripts/development-database-env.mjs";
+
+configureDevelopmentDatabaseEnvironment();
 
 export default defineConfig({
   schema: "prisma/schema.prisma",

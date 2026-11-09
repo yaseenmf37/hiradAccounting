@@ -4,6 +4,7 @@
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Wallet, User, Lock, Eye, EyeOff, Loader2 } from "lucide-react";
+import { setOfflineUnlockCredential } from "@/lib/offline-storage";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -17,6 +18,7 @@ export default function LoginPage() {
     event.preventDefault();
     setError("");
     setLoading(true);
+    let serverAuthenticated = false;
 
     try {
       const response = await fetch("/api/auth/login", {
@@ -31,11 +33,48 @@ export default function LoginPage() {
         setError(data.message || "ورود ناموفق بود.");
         return;
       }
+      serverAuthenticated = true;
 
+      const loggedInUser = data.user as
+        | {
+            id?: unknown;
+            role?: unknown;
+            business?: { id?: unknown } | null;
+          }
+        | undefined;
+      if (
+        loggedInUser?.role === "BUSINESS_OWNER" &&
+        typeof loggedInUser.id === "string" &&
+        typeof loggedInUser.business?.id === "string"
+      ) {
+        const offlineCredentialReady = await setOfflineUnlockCredential(
+          loggedInUser.id,
+          loggedInUser.business.id,
+          password
+        );
+        if (!offlineCredentialReady) {
+          console.warn(
+            "The authenticated password does not unlock this account's existing offline key. Local data was left unchanged."
+          );
+        }
+      }
+      setPassword("");
       router.replace("/");
       router.refresh();
-    } catch {
-      setError("ارتباط با سرور برقرار نشد. دوباره تلاش کنید.");
+    } catch (loginError) {
+      console.error("Login or local workspace setup failed:", loginError);
+      if (serverAuthenticated) {
+        try {
+          await fetch("/api/auth/logout", { method: "POST" });
+        } catch (logoutError) {
+          console.error("Could not revoke session after local setup failed:", logoutError);
+        }
+      }
+      setError(
+        !serverAuthenticated
+          ? "ارتباط با سرور برقرار نشد. دوباره تلاش کنید."
+          : "تنظیم امن فضای آفلاین ناموفق بود؛ برای حفظ امنیت، ورود کامل نشد."
+      );
     } finally {
       setLoading(false);
     }

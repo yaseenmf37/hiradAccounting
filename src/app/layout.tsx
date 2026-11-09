@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import AppFooter from "@/components/shared/app-footer";
 import InputBehavior from "@/components/shared/input-behavior";
+import PwaControls from "@/components/shared/pwa-controls";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -17,6 +18,15 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Hirad Accounting",
   description: "سیستم مدیریت مالی و حسابداری",
+  applicationName: "Hirad Accounting",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "black-translucent",
+    title: "Hirad Accounting",
+  },
+  icons: {
+    apple: "/apple-touch-icon.png",
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -28,6 +38,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full flex flex-col">
         <InputBehavior>
+          <PwaControls />
           {children}
           <AppFooter />
         </InputBehavior>

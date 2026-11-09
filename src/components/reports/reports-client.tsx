@@ -343,61 +343,72 @@ function MonthlyProductDetailsModal({
             <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-4 text-sm text-rose-300">
               {error}
             </div>
-          ) : items?.length ? (
+          ) : items ? (
             <>
-              {hasUnknownProfit && (
-                <p className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] p-3 text-xs leading-6 text-amber-200">
-                  سود محصولاتی که تمام بهای تمام‌شده آن‌ها مشخص نیست، قطعی نمایش داده نمی‌شود.
-                  جمع سود پایین فقط اقلام دارای بهای قابل محاسبه را شامل می‌شود.
+              <p className="mb-3 text-xs text-zinc-400">
+                تعداد اقلام: {formatQuantityAmount(String(items.length))} قلم
+              </p>
+              {items.length > 0 ? (
+                <>
+                  {hasUnknownProfit && (
+                    <p className="mb-4 rounded-xl border border-amber-500/20 bg-amber-500/[0.07] p-3 text-xs leading-6 text-amber-200">
+                      سود محصولاتی که تمام بهای تمام‌شده آن‌ها مشخص نیست، قطعی نمایش داده نمی‌شود.
+                      جمع سود پایین فقط اقلام دارای بهای قابل محاسبه را شامل می‌شود.
+                    </p>
+                  )}
+                  <div className="overflow-x-auto rounded-xl border border-white/[0.07]">
+                    <table className="w-full min-w-[850px] text-sm">
+                      <thead className="bg-white/[0.025] text-right text-xs text-zinc-500">
+                        <tr>
+                          <th className="p-3 font-medium">نام محصول</th>
+                          <th className="p-3 font-medium">تعداد فروخته‌شده</th>
+                          <th className="p-3 font-medium">مبلغ فروش</th>
+                          <th className="p-3 font-medium">تخفیف تخصیص‌یافته</th>
+                          <th className="p-3 font-medium">بهای تمام‌شده</th>
+                          <th className="p-3 font-medium">سود محصول</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/[0.05]">
+                        {items.map((item) => (
+                          <tr key={`${item.month}-${item.productId}`} className="text-zinc-300">
+                            <td className="p-3 font-medium text-white">{item.productName}</td>
+                            <td className="p-3">{formatQuantityAmount(item.quantitySold)}</td>
+                            <td className="p-3 text-emerald-400">{formatAmount(item.sales, unit)}</td>
+                            <td className="p-3 text-amber-300">{formatAmount(item.discount, unit)}</td>
+                            <td className="p-3 text-orange-300">{formatAmount(item.costOfGoodsSold, unit)}</td>
+                            <td className="p-3 text-violet-300">
+                              {item.grossProfit === null
+                                ? "نامشخص؛ بهای تمام‌شده ناقص"
+                                : formatAmount(item.grossProfit, unit)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot className="border-t border-white/10 bg-white/[0.025] font-semibold text-white">
+                        <tr>
+                          <td className="p-3">مجموع</td>
+                          <td className="p-3">—</td>
+                          <td className="p-3 text-emerald-400">{formatAmount(total("sales").toString(), unit)}</td>
+                          <td className="p-3">—</td>
+                          <td className="p-3 text-orange-300">{formatAmount(total("costOfGoodsSold").toString(), unit)}</td>
+                          <td className="p-3 text-violet-300">
+                            {formatAmount(knownProfit.toString(), unit)}
+                            {hasUnknownProfit ? " · بخشی نامشخص" : ""}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </>
+              ) : (
+                <p className="py-12 text-center text-sm text-zinc-500">
+                  برای این ماه اطلاعاتی از فروش یا مرجوعی محصولات ثبت نشده است.
                 </p>
               )}
-              <div className="overflow-x-auto rounded-xl border border-white/[0.07]">
-                <table className="w-full min-w-[850px] text-sm">
-                  <thead className="bg-white/[0.025] text-right text-xs text-zinc-500">
-                    <tr>
-                      <th className="p-3 font-medium">نام محصول</th>
-                      <th className="p-3 font-medium">تعداد فروخته‌شده</th>
-                      <th className="p-3 font-medium">مبلغ فروش</th>
-                      <th className="p-3 font-medium">تخفیف تخصیص‌یافته</th>
-                      <th className="p-3 font-medium">بهای تمام‌شده</th>
-                      <th className="p-3 font-medium">سود محصول</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-white/[0.05]">
-                    {items.map((item) => (
-                      <tr key={`${item.month}-${item.productId}`} className="text-zinc-300">
-                        <td className="p-3 font-medium text-white">{item.productName}</td>
-                        <td className="p-3">{formatQuantityAmount(item.quantitySold)}</td>
-                        <td className="p-3 text-emerald-400">{formatAmount(item.sales, unit)}</td>
-                        <td className="p-3 text-amber-300">{formatAmount(item.discount, unit)}</td>
-                        <td className="p-3 text-orange-300">{formatAmount(item.costOfGoodsSold, unit)}</td>
-                        <td className="p-3 text-violet-300">
-                          {item.grossProfit === null
-                            ? "نامشخص؛ بهای تمام‌شده ناقص"
-                            : formatAmount(item.grossProfit, unit)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot className="border-t border-white/10 bg-white/[0.025] font-semibold text-white">
-                    <tr>
-                      <td className="p-3">مجموع</td>
-                      <td className="p-3">—</td>
-                      <td className="p-3 text-emerald-400">{formatAmount(total("sales").toString(), unit)}</td>
-                      <td className="p-3">—</td>
-                      <td className="p-3 text-orange-300">{formatAmount(total("costOfGoodsSold").toString(), unit)}</td>
-                      <td className="p-3 text-violet-300">
-                        {formatAmount(knownProfit.toString(), unit)}
-                        {hasUnknownProfit ? " · بخشی نامشخص" : ""}
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
             </>
           ) : (
             <p className="py-12 text-center text-sm text-zinc-500">
-              برای این ماه اطلاعاتی از فروش یا مرجوعی محصولات ثبت نشده است.
+              جزئیات محصولات هنوز دریافت نشده است.
             </p>
           )}
         </div>
