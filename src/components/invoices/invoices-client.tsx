@@ -199,6 +199,20 @@ function percentageDiscountAmount(base: bigint, value: string) {
   return (base * units + 5000n) / 10000n;
 }
 
+function allocatePrintDiscount(discount: bigint, items: InvoiceItem[]) {
+  const weights = items.map((item) => BigInt(item.total ?? "0"));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
+  if (totalWeight <= 0n) return weights.map(() => 0n);
+
+  const allocations = weights.map((weight) => (discount * weight) / totalWeight);
+  let remainder = discount - allocations.reduce((sum, amount) => sum + amount, 0n);
+  for (let index = 0; remainder > 0n; index = (index + 1) % allocations.length) {
+    allocations[index] += 1n;
+    remainder -= 1n;
+  }
+  return allocations;
+}
+
 function formatDiscountPercent(value: string) {
   return `${new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 2 }).format(Number(value))}٪`;
 }
@@ -650,12 +664,10 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
     }
   };
 
-  const addItem = () => setItems((current) => [...current, emptyItem()]);
+  const addItem = () => setItems((current) => [emptyItem(), ...current]);
 
   const removeItem = (index: number) => {
-    setItems((current) =>
-      current.length > 1 ? current.filter((_, i) => i !== index) : current
-    );
+    setItems((current) => current.filter((_, i) => i !== index));
   };
 
   const updateItem = (
@@ -690,20 +702,8 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
         : [];
     });
   };
-  const chooseShortageModes = (
-    shortages: { product: Product; quantity: bigint }[],
-  ): Record<string, "NEGATIVE"> | null => {
-    const modes: Record<string, "NEGATIVE"> = {};
-    for (const { product, quantity } of shortages) {
-      const resultingStock = parseStockUnits(product.stock) - quantity;
-      const confirmed = window.confirm(
-        `موجودی «${product.name}» ${formatQuantity(product.stock)} ${product.unit} است، اما مقدار سفارش ${formatQuantityUnits(quantity)} است.\nبا ادامه، موجودی پس از صدور ${formatQuantityUnits(resultingStock)} ${product.unit} خواهد شد و مقدار کمبود در فهرست کسری سفارش‌های فروش ثبت می‌شود.\nآیا ادامه می‌دهید؟`,
-      );
-      if (!confirmed) return null;
-      modes[product.id] = "NEGATIVE";
-    }
-    return modes;
-  };
+  const confirmNegativeStock = () =>
+    window.confirm("تعداد سفارش بیشتر از موجودی انبار است. آیا ادامه می‌دهید؟");
   const matchingProducts = products.filter((product) =>
     product.name.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase()) ||
     product.sku?.toLocaleLowerCase().includes(productSearch.trim().toLocaleLowerCase())
@@ -715,12 +715,57 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
       const existing = current.findIndex((item) => item.productId === product.id);
       if (existing >= 0) {
         return current.map((item, index) => index === existing
-          ? { ...item, quantity: formatQuantityUnits(parseQuantityUnits(item.quantity) + 1000n) }
+          ? {
+              ...item,
+              quantity: formatQuantityUnits(parseQuantityUnits(item.quantity) + 1000n),
+            }
           : item);
       }
       const rows = current.length === 1 && !current[0].productId ? [] : current;
-      return [...rows, { productId: product.id, quantity: "1", unitPrice: displayedPrice }];
+      return [{ productId: product.id, quantity: "1", unitPrice: displayedPrice }, ...rows];
     });
+  };
+
+  const selectItemProduct = (index: number, productId: string) => {
+    if (items[index]?.productId === productId) return;
+    const duplicateIndex = items.findIndex(
+      (item, itemIndex) => itemIndex !== index && item.productId === productId,
+    );
+    if (productId && duplicateIndex >= 0) {
+      setItems((current) => {
+        const source = current[index];
+        const duplicate = current[duplicateIndex];
+        if (!source || !duplicate) return current;
+        const merged = current.map((item, itemIndex) => itemIndex === duplicateIndex
+          ? {
+              ...item,
+              quantity: formatQuantityUnits(
+                parseQuantityUnits(item.quantity) + parseQuantityUnits(source.quantity),
+              ),
+            }
+          : item);
+        return merged.filter((_, itemIndex) => itemIndex !== index);
+      });
+      return;
+    }
+
+    const selected = selectedProduct(productId);
+    setItems((current) => current.map((item, itemIndex) =>
+      itemIndex === index
+        ? {
+            ...item,
+            productId,
+            ...(selected
+              ? {
+                  unitPrice: rialAmountToInput(
+                    type === "PURCHASE" ? selected.purchasePrice : selected.salePrice,
+                    currencyUnit,
+                  ),
+                }
+              : {}),
+          }
+        : item,
+    ));
   };
 
   const createQuickProduct = async (event: FormEvent<HTMLFormElement>) => {
@@ -765,6 +810,10 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
   const finalTotal = subtotal +
     (parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n) -
     discountAmount;
+  const isUnpricedProforma =
+    type === "SALE" &&
+    !issueImmediately &&
+    editingInvoice?.status !== "ISSUED";
   const actualPaymentTotal = payments.reduce(
     (sum, payment) => payment.method === "LEDGER"
       ? sum
@@ -783,6 +832,12 @@ export default function InvoicesClient({ currencyUnit, initialType, quickAction 
 const detailGrossProfit = detailInvoice
   ? BigInt(detailInvoice.total) - detailCostOfGoodsSold
   : 0n;
+  const printEmptyRowCount = detailInvoice
+    ? Math.max(0, 28 - detailInvoice.items.length)
+    : 0;
+  const printDiscounts = detailInvoice
+    ? allocatePrintDiscount(BigInt(detailInvoice.discount), detailInvoice.items)
+    : [];
 
   const submitInvoice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -799,9 +854,10 @@ const detailGrossProfit = detailInvoice
       }
       if (validItems.some((item) =>
         parseQuantityUnits(item.quantity) <= 0n ||
-        parseCurrencyAmount(item.unitPrice, currencyUnit) === null
+        parseCurrencyAmount(item.unitPrice, currencyUnit) === null ||
+        (!isUnpricedProforma && (parseCurrencyAmount(item.unitPrice, currencyUnit) ?? 0n) <= 0n)
       )) {
-        throw new Error("تعداد و قیمت همه اقلام باید معتبر و مثبت باشند.");
+        throw new Error("تعداد اقلام باید معتبر باشد و قیمت هر کالا در فاکتور عادی بیشتر از صفر باشد.");
       }
       if (
         parseCurrencyAmount(extraCosts, currencyUnit) === null ||
@@ -830,7 +886,7 @@ const detailGrossProfit = detailInvoice
         items: validItems.map((item) => ({
           ...item,
           quantity: normalizeDigits(item.quantity),
-          unitPrice: normalizeDigits(item.unitPrice),
+          unitPrice: normalizeDigits(item.unitPrice.trim() || "0"),
         })),
         payments: payments.map((payment) => ({
           ...payment,
@@ -858,7 +914,6 @@ const detailGrossProfit = detailInvoice
           : "مجموع روش‌های پرداخت بیشتر از مبلغ فاکتور است.");
       }
 
-      let directShortageModes: Record<string, "NEGATIVE"> = {};
       if (issueImmediately && type === "SALE" && !editingInvoice) {
         const productIds = [...new Set(validItems.map((item) => item.productId))];
         const productResponse = await fetch(
@@ -873,13 +928,7 @@ const detailGrossProfit = detailInvoice
           return [...byId.values()];
         });
         const shortages = getShortages(validItems, currentProducts);
-        if (shortages.length) {
-          const selection = chooseShortageModes(shortages);
-          if (!selection) {
-            throw new Error("صدور مستقیم انصراف داده شد؛ فاکتور ثبت نشد.");
-          }
-          directShortageModes = selection;
-        }
+        if (shortages.length && !confirmNegativeStock()) return;
       }
 
       const response = await fetch(
@@ -898,7 +947,7 @@ const detailGrossProfit = detailInvoice
         const issueResponse = await fetch(`/api/invoices/${saved.invoice.id}/issue`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ shortageModes: directShortageModes }),
+          body: JSON.stringify({}),
         });
         try {
           await readResponse(issueResponse);
@@ -933,7 +982,6 @@ const detailGrossProfit = detailInvoice
     setError("");
 
     try {
-      let shortageModes: Record<string, "NEGATIVE"> = {};
       if (invoice.type === "SALE") {
         const productIds = [...new Set(invoice.items.map((item) => item.productId))];
         const productResponse = await fetch(
@@ -949,9 +997,7 @@ const detailGrossProfit = detailInvoice
         });
         const shortages = getShortages(invoice.items, currentProducts);
         if (shortages.length) {
-          const selection = chooseShortageModes(shortages);
-          if (!selection) return;
-          shortageModes = selection;
+          if (!confirmNegativeStock()) return;
         } else if (!window.confirm(`فاکتور ${invoice.invoiceNumber} صادر شود؟`)) return;
       } else if (!window.confirm(`فاکتور ${invoice.invoiceNumber} صادر شود؟`)) return;
 
@@ -960,7 +1006,7 @@ const detailGrossProfit = detailInvoice
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ shortageModes }),
+          body: JSON.stringify({}),
         }
       );
       await readResponse(response);
@@ -1044,9 +1090,7 @@ const detailGrossProfit = detailInvoice
       ),
       0n,
     ) ?? 0n;
-    const returnableQuantity = invoice.type === "SALE"
-      ? parseQuantityUnits(item.costedQuantity ?? "0")
-      : parseQuantityUnits(item.quantity);
+    const returnableQuantity = parseQuantityUnits(item.quantity);
     const remaining = returnableQuantity - returned;
     return remaining > 0n ? remaining : 0n;
   };
@@ -1422,10 +1466,10 @@ const detailGrossProfit = detailInvoice
       </div>
 
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/70 p-3 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/70 p-4 backdrop-blur-sm">
           <form
             onSubmit={submitInvoice}
-            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[96rem] flex-col overflow-hidden rounded-2xl border border-[#263341] bg-[#111820] shadow-2xl"
+            className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#263341] bg-[#111820] shadow-2xl"
           >
             <div className="flex items-center justify-between border-b border-[#263341] px-5 py-4">
               <div>
@@ -1507,26 +1551,29 @@ const detailGrossProfit = detailInvoice
               <div className="grid gap-4 sm:grid-cols-2">
                 {type === "SALE" && (
                   <>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>مرجع</span>
-                      <input
-                        maxLength={150}
-                        value={reference}
-                        onChange={(event) => setReference(event.target.value)}
-                        placeholder="مرجع فاکتور فروش"
-                        className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>شماره مرجع</span>
-                      <input
-                        maxLength={100}
-                        value={referenceNumber}
-                        onChange={(event) => setReferenceNumber(event.target.value)}
-                        placeholder="شماره مرجع"
-                        className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
-                      />
-                    </label>
+                    {/* فیلدهای مرجع موقتاً از فرم پنهان هستند؛ state و payload برای بازگردانی حفظ شده‌اند. */}
+                    {/*
+                      <label className="space-y-2 text-sm text-slate-300">
+                        <span>مرجع</span>
+                        <input
+                          maxLength={150}
+                          value={reference}
+                          onChange={(event) => setReference(event.target.value)}
+                          placeholder="مرجع فاکتور فروش"
+                          className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
+                        />
+                      </label>
+                      <label className="space-y-2 text-sm text-slate-300">
+                        <span>شماره مرجع</span>
+                        <input
+                          maxLength={100}
+                          value={referenceNumber}
+                          onChange={(event) => setReferenceNumber(event.target.value)}
+                          placeholder="شماره مرجع"
+                          className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
+                        />
+                      </label>
+                    */}
                   </>
                 )}
                 <label className="space-y-2 text-sm text-slate-300">
@@ -1600,89 +1647,86 @@ const detailGrossProfit = detailInvoice
                   </button>
                 </div>
 
-                {items.map((item, index) => {
-                  const product = selectedProduct(item.productId);
-                  const lineTotal = lineAmount(item.quantity, item.unitPrice, currencyUnit);
-
-                  return (
-                    <div key={index} className="grid gap-3 rounded-xl border border-[#263341] bg-[#0d141c] p-3 sm:grid-cols-[2fr_1fr_1fr_1fr_auto] sm:items-end">
-                      <label className="space-y-2 text-xs text-slate-400">
-                        <span>کالا</span>
-                        <select
-                          required
-                          value={item.productId}
-                          onChange={(event) => {
-                            const selected = selectedProduct(event.target.value);
-                            updateItem(index, "productId", event.target.value);
-                            if (selected) {
-                              updateItem(
-                                index,
-                                "unitPrice",
-                                type === "PURCHASE"
-                                  ? rialAmountToInput(selected.purchasePrice, currencyUnit)
-                                  : rialAmountToInput(selected.salePrice, currencyUnit)
-                              );
-                            }
-                          }}
-                          className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
-                        >
-                          <option value="">انتخاب کالا</option>
-                          {products.map((product) => (
-                            <option key={product.id} value={product.id}>
-                              {product.name} - موجودی: {formatQuantity(product.stock)} {product.unit}
-                            </option>
-                          ))}
-                        </select>
-                        {product && (
-                          <span className="block text-[11px] text-slate-500">
-                            واحد: {product.unit}
-                            {type === "SALE" && ` · قیمت خرید ثبت‌شده: ${formatMoney(product.purchasePrice, currencyUnit)}`}
-                          </span>
-                        )}
-                      </label>
-
-                      <label className="space-y-2 text-xs text-slate-400">
-                        <span>تعداد</span>
-                        <NumericInput
-                          required
-                          min="0.001"
-                          step="0.001"
-                          value={item.quantity}
-                          onChange={(event) => updateItem(index, "quantity", event.target.value)}
-                          className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
-                        />
-                      </label>
-
-                      <label className="space-y-2 text-xs text-slate-400">
-                        <span>قیمت واحد ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})</span>
-                        <NumericInput
-                          required
-                          min="0"
-                          step={currencyUnit === "TOMAN" ? "0.1" : "1"}
-                          value={item.unitPrice}
-                          onChange={(event) => updateItem(index, "unitPrice", event.target.value)}
-                          className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
-                        />
-                      </label>
-
-                      <div className="space-y-2 text-xs text-slate-400">
-                        <span className="block">جمع ردیف</span>
-                        <span className="block rounded-lg bg-[#111820] p-2.5 font-semibold text-white">
-                          {formatMoney(lineTotal, currencyUnit)}
-                        </span>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => removeItem(index)}
-                        disabled={items.length === 1}
-                        className="rounded-lg p-2 text-red-400 hover:bg-red-500/10 disabled:opacity-30"
-                      >
-                        <Trash2 size={17} />
-                      </button>
-                    </div>
-                  );
-                })}
+                <div className="overflow-x-auto rounded-xl border border-[#263341]">
+                  <table className="w-full min-w-[620px] border-collapse text-right text-xs">
+                    <thead className="bg-[#0d141c] text-slate-400">
+                      <tr>
+                        <th className="border border-[#344353] px-3 py-3 font-medium">نام محصول</th>
+                        <th className="w-36 border border-[#344353] px-3 py-3 font-medium">تعداد</th>
+                        <th className="w-44 border border-[#344353] px-3 py-3 font-medium">قیمت واحد</th>
+                        <th className="w-20 border border-[#344353] px-3 py-3 text-center font-medium">عملیات</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((item, index) => {
+                        const product = selectedProduct(item.productId);
+                        const lineTotal = lineAmount(item.quantity, item.unitPrice, currencyUnit);
+                        return (
+                          <tr key={index} className="bg-[#0d141c]">
+                            <td className="min-w-64 border border-[#344353] px-3 py-3">
+                              <select
+                                required
+                                aria-label="نام محصول"
+                                value={item.productId}
+                                onChange={(event) => selectItemProduct(index, event.target.value)}
+                                className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
+                              >
+                                <option value="">انتخاب کالا</option>
+                                {products.map((candidate) => (
+                                  <option key={candidate.id} value={candidate.id}>
+                                    {candidate.name} - موجودی: {formatQuantity(candidate.stock)} {candidate.unit}
+                                  </option>
+                                ))}
+                              </select>
+                              {product && (
+                                <span className="mt-1 block text-[11px] text-slate-500">
+                                  واحد: {product.unit}
+                                  {type === "SALE" && ` · قیمت خرید ثبت‌شده: ${formatMoney(product.purchasePrice, currencyUnit)}`}
+                                </span>
+                              )}
+                            </td>
+                            <td className="border border-[#344353] px-3 py-3">
+                              <NumericInput
+                                required
+                                min="0.001"
+                                step="0.001"
+                                aria-label="تعداد"
+                                value={item.quantity}
+                                onChange={(event) => updateItem(index, "quantity", event.target.value)}
+                                className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
+                              />
+                            </td>
+                            <td className="border border-[#344353] px-3 py-3">
+                              <NumericInput
+                                required={!isUnpricedProforma}
+                                min="0"
+                                step={currencyUnit === "TOMAN" ? "0.1" : "1"}
+                                aria-label="قیمت واحد"
+                                placeholder={isUnpricedProforma ? "اختیاری" : "قیمت"}
+                                value={item.unitPrice}
+                                onChange={(event) => updateItem(index, "unitPrice", event.target.value)}
+                                className="w-full rounded-lg border border-[#263341] bg-[#111820] p-2.5 text-sm text-white outline-none"
+                              />
+                              <span className="mt-1 block text-[11px] text-slate-500">
+                                جمع ردیف: {formatMoney(lineTotal, currencyUnit)}
+                              </span>
+                            </td>
+                            <td className="border border-[#344353] px-3 py-3 text-center">
+                              <button
+                                type="button"
+                                aria-label="حذف محصول"
+                                onClick={() => removeItem(index)}
+                                className="rounded-lg p-2 text-red-400 hover:bg-red-500/10"
+                              >
+                                <Trash2 size={17} />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
@@ -1851,7 +1895,7 @@ const detailGrossProfit = detailInvoice
 
       {quickProductOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
-          <form onSubmit={createQuickProduct} className="w-full max-w-lg space-y-4 rounded-2xl border border-[#263341] bg-[#111820] p-5">
+          <form onSubmit={createQuickProduct} className="h-[calc(100dvh-2rem)] w-full space-y-4 overflow-y-auto rounded-2xl border border-[#263341] bg-[#111820] p-5">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-white">ایجاد کالا در فاکتور</h3>
               <button type="button" onClick={() => setQuickProductOpen(false)} className="rounded-lg p-2 text-slate-400 hover:bg-white/5"><X size={18} /></button>
@@ -1882,8 +1926,8 @@ const detailGrossProfit = detailInvoice
       )}
 
       {detailInvoice && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/70 p-3 backdrop-blur-sm">
-          <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#263341] bg-[#111820]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/70 p-4 backdrop-blur-sm">
+          <div className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#263341] bg-[#111820]">
             <div className="flex items-center justify-between border-b border-[#263341] p-5">
               <div>
                 <h3 className="font-bold text-white">جزئیات فاکتور</h3>
@@ -2112,27 +2156,21 @@ const detailGrossProfit = detailInvoice
               <header className="print-invoice-header">
                 <div>
                   <h1>{detailInvoice.type === "SALE" ? "فاکتور فروش" : "فاکتور خرید"}</h1>
-                  <strong>{detailInvoice.business?.name ?? "Hirad Accounting"}</strong>
-                  {detailInvoice.business?.phone && <p>تلفن: {detailInvoice.business.phone}</p>}
+                </div>
+                <div className="print-invoice-brand">
+                  <strong>هیراد اکانتینگ</strong>
+                  <p>{detailInvoice.business?.name ?? "—"}</p>
                 </div>
                 <div className="print-invoice-meta">
-                  <p>شماره: {detailInvoice.invoiceNumber}</p>
-                  {(detailInvoice.type === "SALE" && (detailInvoice.reference || detailInvoice.referenceNumber)) && (
-                    <p>
-                      مرجع: {[detailInvoice.reference, detailInvoice.referenceNumber].filter(Boolean).join(" · ")}
-                    </p>
-                  )}
+                  <p>شماره فاکتور: {detailInvoice.invoiceNumber.replace(/\d/g, (digit) => "۰۱۲۳۴۵۶۷۸۹"[Number(digit)])}</p>
                   <p>تاریخ: {formatInvoiceDate(detailInvoice.invoiceDate ?? detailInvoice.issuedAt ?? detailInvoice.createdAt)}</p>
                   <p>{detailInvoice.type === "SALE" ? "خریدار" : "فروشنده"}: {detailInvoice.contact?.name ?? detailInvoice.contactNameSnapshot ?? "—"}</p>
-                  {(detailInvoice.contact?.phone ?? detailInvoice.contactPhoneSnapshot) && <p>تلفن: {detailInvoice.contact?.phone ?? detailInvoice.contactPhoneSnapshot}</p>}
-                  {(detailInvoice.contact?.address ?? detailInvoice.contactAddressSnapshot) && <p>آدرس: {detailInvoice.contact?.address ?? detailInvoice.contactAddressSnapshot}</p>}
                 </div>
               </header>
               <table className="print-invoice-table">
                 <thead>
                   <tr>
-                    <th>ردیف</th><th>نام کالا</th><th>تعداد</th><th>واحد</th>
-                    <th>قیمت واحد</th><th>مبلغ</th>
+                    <th>ردیف</th><th>نام کالا</th><th>تعداد</th><th>قیمت واحد</th><th>تخفیف</th><th>جمع ردیف</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2141,47 +2179,46 @@ const detailGrossProfit = detailInvoice
                       <td>{moneyFormat.format(index + 1)}</td>
                       <td>{item.product?.name ?? "کالا"}</td>
                       <td>{formatQuantity(item.quantity)}</td>
-                      <td>{item.product?.unit ?? "—"}</td>
                       <td>{formatMoney(item.unitPrice, currencyUnit)}</td>
+                      <td>{formatMoney(printDiscounts[index]?.toString() ?? "0", currencyUnit)}</td>
                       <td>{formatMoney(item.total ?? "0", currencyUnit)}</td>
+                    </tr>
+                  ))}
+                  {Array.from({ length: printEmptyRowCount }, (_, index) => (
+                    <tr key={`print-empty-${index}`} className="print-invoice-empty-row">
+                      <td>{moneyFormat.format(detailInvoice.items.length + index + 1)}</td>
+                      <td></td>
+                      <td></td>
+                      <td></td>
+                      <td></td>
+                      <td></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              <div className="print-invoice-totals">
-                <p>جمع کالاها: {formatMoney(detailInvoice.subtotal, currencyUnit)}</p>
-                <p>هزینه جانبی: {formatMoney(detailInvoice.extraCosts, currencyUnit)}</p>
-                <p>
-                  تخفیف{detailInvoice.discountPercent !== null && detailInvoice.discountPercent !== undefined
-                    ? ` (${formatDiscountPercent(detailInvoice.discountPercent)})`
-                    : ""}: {formatMoney(detailInvoice.discount, currencyUnit)}
-                </p>
-                <strong>مبلغ نهایی: {formatMoney(detailInvoice.total, currencyUnit)}</strong>
-              </div>
-              {detailInvoice.payments && detailInvoice.payments.length > 0 && (
-                <div className="print-invoice-payments">
-                  <h2>اطلاعات پرداخت</h2>
-                  {detailInvoice.payments.map((payment, index) => (
-                    <div key={`${payment.method}-${index}`}>
-                      <p>
-                        {paymentMethodLabels[payment.method as PaymentForm["method"]] ?? payment.method}: {formatMoney(payment.amount, currencyUnit)}
-                        {payment.description ? ` — ${payment.description}` : ""}
-                      </p>
-                      {getPaymentDetails(payment).map((detail) => <p key={detail}>{detail}</p>)}
-                    </div>
-                  ))}
+              <div className="print-invoice-bottom">
+                {detailInvoice.description && <p className="print-invoice-description">توضیحات: {detailInvoice.description}</p>}
+                <div className="print-invoice-totals">
+                  <p>
+                    تخفیف{detailInvoice.discountPercent !== null && detailInvoice.discountPercent !== undefined
+                      ? ` (${formatDiscountPercent(detailInvoice.discountPercent)})`
+                      : ""}: {formatMoney(detailInvoice.discount, currencyUnit)}
+                  </p>
+                  <strong>مبلغ نهایی: {formatMoney(detailInvoice.total, currencyUnit)}</strong>
                 </div>
-              )}
-              {detailInvoice.description && <p className="print-invoice-description">توضیحات: {detailInvoice.description}</p>}
-              <footer className="print-invoice-signatures">
-                <span>امضای {detailInvoice.type === "SALE" ? "خریدار" : "فروشنده"}</span>
-                <span>امضای {detailInvoice.type === "SALE" ? "فروشنده" : "خریدار"}</span>
-              </footer>
+                <footer className="print-invoice-footer">
+                  <div className="print-invoice-signatures">
+                    <span>امضای {detailInvoice.type === "SALE" ? "خریدار" : "فروشنده"}</span>
+                    <span>امضای {detailInvoice.type === "SALE" ? "فروشنده" : "خریدار"}</span>
+                  </div>
+                  <p className="print-invoice-thanks">ممنون از خرید شما</p>
+                </footer>
+              </div>
             </section>, printContainer)}
 
               {returnModalOpen && detailInvoice?.status === "ISSUED" && (
-                <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/80 p-3 backdrop-blur-sm">
-                  <form onSubmit={submitInvoiceReturn} className="my-6 w-full max-w-2xl rounded-2xl border border-[#263341] bg-[#111820]">
+                <div className="fixed inset-0 z-[60] flex items-center justify-center overflow-hidden bg-black/80 p-4 backdrop-blur-sm">
+                  <form onSubmit={submitInvoiceReturn} className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#263341] bg-[#111820]">
                     <div className="flex items-center justify-between border-b border-[#263341] p-5">
                       <div>
                         <h3 className="font-bold text-white">ثبت مرجوعی {detailInvoice.type === "SALE" ? "فروش" : "خرید"}</h3>
@@ -2191,7 +2228,7 @@ const detailGrossProfit = detailInvoice
                         <X size={20} />
                       </button>
                     </div>
-                    <div className="max-h-[70vh] space-y-4 overflow-y-auto p-5">
+                    <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
                       {detailInvoice.items.map((item) => {
                         const available = item.id ? remainingReturnQuantity(detailInvoice, item.id) : 0n;
                         if (available <= 0n) return null;

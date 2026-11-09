@@ -113,7 +113,7 @@ function Modal({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-white/10 bg-[#151b26] shadow-2xl">
+      <div className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#151b26] shadow-2xl">
         <div className="sticky top-0 flex items-center justify-between border-b border-white/10 bg-[#151b26] px-5 py-4">
           <h2 className="text-lg font-bold text-white">{title}</h2>
           <button
@@ -123,7 +123,7 @@ function Modal({
             <X size={19} />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
       </div>
     </div>
   );

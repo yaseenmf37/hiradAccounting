@@ -23,51 +23,37 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ message: "محدوده صفحه‌بندی معتبر نیست." }, { status: 400 });
     }
 
-    const where: Prisma.BackorderWhereInput = {
+    const where: Prisma.ProductWhereInput = {
       businessId,
-      cancelledAt: null,
-      outstanding: { gt: 0 },
-      invoice: { is: { type: "SALE", status: "ISSUED" } },
+      stock: { lt: 0 },
     };
     const [rows, total] = await prisma.$transaction([
-      prisma.backorder.findMany({
+      prisma.product.findMany({
         where,
         select: {
           id: true,
-          requested: true,
-          fulfilled: true,
-          outstanding: true,
-          inventoryDeducted: true,
-          cancelledAt: true,
-          createdAt: true,
-          product: { select: { name: true, unit: true, stock: true } },
-          invoice: {
-            select: {
-              invoiceNumber: true,
-              contactNameSnapshot: true,
-              contact: { select: { name: true } },
-            },
-          },
+          name: true,
+          unit: true,
+          stock: true,
         },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        orderBy: { id: "asc" },
         take: pagination.limit + 1,
         ...(pagination.cursor
           ? { cursor: { id: pagination.cursor }, skip: 1 }
           : {}),
       }),
-      prisma.backorder.count({ where }),
+      prisma.product.count({ where }),
     ]);
     const page = getCursorPage(rows, pagination.limit);
     return NextResponse.json({
       backorders: page.items.map((entry) => ({
-        ...entry,
-        requested: entry.requested.toString(),
-        fulfilled: entry.fulfilled.toString(),
-        outstanding: entry.outstanding.toString(),
-        inventoryDeducted: entry.inventoryDeducted,
-        cancelledAt: entry.cancelledAt?.toISOString() ?? null,
-        product: { ...entry.product, stock: entry.product.stock.toString() },
-        customerName: entry.invoice.contactNameSnapshot ?? entry.invoice.contact?.name ?? null,
+        id: entry.id,
+        product: {
+          name: entry.name,
+          unit: entry.unit,
+          stock: entry.stock.toString(),
+        },
+        shortage: entry.stock.abs().toString(),
       })),
       total,
       nextCursor: page.nextCursor,
@@ -151,9 +137,6 @@ export async function POST(request: NextRequest) {
       });
       if (updated.count !== 1) throw new Error("BACKORDER_CONFLICT");
 
-      await tx.backorderAllocation.create({
-        data: { backorderId: backorder.id, quantity: requested },
-      });
       const itemUpdated = await tx.invoiceItem.updateMany({
         where: {
           id: backorder.invoiceItem.id,
@@ -166,7 +149,7 @@ export async function POST(request: NextRequest) {
         },
       });
       if (itemUpdated.count !== 1) throw new Error("BACKORDER_CONFLICT");
-      await tx.inventoryMovement.create({
+      const movement = await tx.inventoryMovement.create({
         data: {
           businessId,
           productId: backorder.product.id,
@@ -176,6 +159,14 @@ export async function POST(request: NextRequest) {
           totalCost: cost,
           averageCost,
           description: `تأمین کسری فاکتور ${backorder.invoice.invoiceNumber}`,
+        },
+      });
+      await tx.backorderAllocation.create({
+        data: {
+          backorderId: backorder.id,
+          quantity: requested,
+          totalCost: cost,
+          inventoryMovementId: movement.id,
         },
       });
       const [remainingBackorders, items] = await Promise.all([

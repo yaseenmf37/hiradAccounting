@@ -43,7 +43,7 @@ button {
 
 @page {
   size: A4;
-  margin: 9mm;
+  margin: 0;
 }
 
 @media print {
@@ -82,7 +82,11 @@ button {
     position: static !important;
     inset: auto !important;
     width: 100% !important;
-    min-height: 0;
+    min-height: 297mm;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    padding: 9mm;
   }
 
   .print-only h1 {
@@ -91,17 +95,25 @@ button {
   }
 
   .print-invoice-header {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: flex-start;
     gap: 12px;
     padding-bottom: 6px;
     border-bottom: 2px solid #222;
   }
 
+  .print-invoice-brand {
+    text-align: center;
+  }
+
+  .print-invoice-brand p {
+    margin: 3px 0 0;
+  }
+
   .print-invoice-header p,
   .print-invoice-meta p,
-  .print-invoice-totals p,
-  .print-invoice-payments p {
+  .print-invoice-totals p {
     margin: 2px 0;
   }
 
@@ -120,12 +132,16 @@ button {
     border-collapse: collapse;
   }
 
+  .print-invoice-root > .print-invoice-table {
+    flex: 1 0 auto;
+  }
+
   .print-invoice-table th,
   .print-invoice-table td {
-    padding: 4px 6px;
+    padding: 2px 6px;
     border: 1px solid #777;
     text-align: right;
-    line-height: 1.35;
+    line-height: 1.2;
   }
 
   .print-invoice-table th {
@@ -138,16 +154,16 @@ button {
     margin: 8px 0 0 auto;
   }
 
+  .print-invoice-totals p {
+    text-align: right;
+  }
+
   .print-invoice-totals strong {
     display: block;
     margin-top: 4px;
     padding-top: 4px;
     border-top: 1px solid #555;
     font-size: 14px;
-  }
-
-  .print-invoice-payments {
-    margin-top: 6px;
   }
 
   .print-invoice-description {
@@ -157,9 +173,34 @@ button {
     white-space: nowrap;
   }
 
+  .print-invoice-empty-row td {
+    height: 6.5mm;
+  }
+
   .print-invoice-signatures {
     display: flex;
     justify-content: space-between;
-    margin-top: 14px;
+    margin-top: 0;
+  }
+
+  .print-invoice-footer {
+    padding-top: 8px;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-invoice-bottom {
+    flex: 0 0 auto;
+    margin-top: auto;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .print-invoice-thanks {
+    margin: 8px 0 0;
+    padding-top: 6px;
+    border-top: 1px solid #777;
+    text-align: center;
+    font-weight: bold;
   }
 }

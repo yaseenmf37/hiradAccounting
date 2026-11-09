@@ -1083,7 +1083,7 @@ export default function DashboardClient({
             }
           }}
         >
-          <div className="my-auto w-full max-w-lg overflow-hidden rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
+          <div className="my-auto flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
             <div className="flex items-center justify-between border-b border-[#222d38] p-5">
               <div>
                 <h2 className="text-lg font-bold">تنظیمات حساب</h2>
@@ -1103,7 +1103,7 @@ export default function DashboardClient({
               </button>
             </div>
 
-            <div className="space-y-6 p-5">
+            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5">
               <div className="rounded-xl border border-[#293642] bg-[#0b0f14] p-4">
                 <div className="mb-4 flex items-center gap-2 text-green-400">
                   <UserRound size={19} />

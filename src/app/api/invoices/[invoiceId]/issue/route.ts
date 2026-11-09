@@ -4,7 +4,6 @@ import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { MAX_CURRENCY_RIAL } from "@/lib/currency";
 import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
-import { z } from "zod";
 
 type RouteContext = {
   params: Promise<{ invoiceId: string }>;
@@ -14,6 +13,7 @@ type InvoiceItemData = {
   id: string;
   productId: string;
   quantity: Prisma.Decimal;
+  unitPrice: bigint;
   total: bigint;
 };
 
@@ -59,10 +59,7 @@ function serializeInvoice(invoice: {
   };
 }
 
-export async function POST(
-  request: NextRequest,
-  context: RouteContext
-) {
+export async function POST(_request: NextRequest, context: RouteContext) {
   try {
     const user = await getCurrentUser();
 
@@ -82,23 +79,6 @@ export async function POST(
 
     const { invoiceId } = await context.params;
     const businessId = user.business.id;
-    const bodyText = await request.text();
-    let requestBody: unknown = {};
-    if (bodyText) {
-      try {
-        requestBody = JSON.parse(bodyText);
-      } catch {
-        return NextResponse.json({ message: "درخواست صدور معتبر نیست." }, { status: 400 });
-      }
-    }
-    const parsedRequest = z.object({
-      shortageModes: z.record(z.string(), z.enum(["NEGATIVE", "BACKORDER"])).optional(),
-    }).safeParse(requestBody);
-    if (!parsedRequest.success) {
-      return NextResponse.json({ message: "روش مدیریت کسری موجودی معتبر نیست." }, { status: 400 });
-    }
-    const shortageModes = parsedRequest.data.shortageModes ?? {};
-
     const result = await prisma.$transaction(
       async (tx) => {
         const invoice = await tx.invoice.findFirst({
@@ -133,6 +113,9 @@ export async function POST(
         }
         if (invoice.items.length === 0) {
           throw new Error("INVOICE_EMPTY");
+        }
+        if (invoice.items.some((item) => item.unitPrice <= 0n)) {
+          throw new Error("INVOICE_ITEM_PRICE_REQUIRED");
         }
         const paymentTotal = invoice.payments.reduce((sum, payment) => sum + payment.amount, 0n);
         if (invoice.paymentPlanRecorded && paymentTotal !== invoice.total) {
@@ -214,7 +197,6 @@ export async function POST(
 
         // پردازش هر کالا فقط یک‌بار
         for (const [productId, group] of groupedItems) {
-          const shortageMode = shortageModes[productId];
           const product = await tx.product.findFirst({
             where: {
               id: productId,
@@ -254,10 +236,6 @@ export async function POST(
             newInventoryValue = inventory.inventoryValue;
             newAverageCost = inventory.averageCost;
           } else {
-            if (product.stock.lessThan(group.quantity) && !shortageMode) {
-              throw new Error("SHORTAGE_MODE_REQUIRED");
-            }
-
             const available = product.stock.greaterThan(0)
               ? Prisma.Decimal.min(product.stock, group.quantity)
               : new Prisma.Decimal(0);
@@ -463,16 +441,16 @@ export async function POST(
           message: "فاکتور هیچ کالایی ندارد.",
           status: 400,
         },
+        INVOICE_ITEM_PRICE_REQUIRED: {
+          message: "برای صدور فاکتور، قیمت واحد همه کالاها باید بیشتر از صفر باشد.",
+          status: 400,
+        },
         PRODUCT_NOT_FOUND: {
           message: "یک یا چند کالا دیگر معتبر یا فعال نیستند.",
           status: 400,
         },
         INSUFFICIENT_STOCK: {
           message: "موجودی یک یا چند کالا برای صدور فاکتور کافی نیست.",
-          status: 409,
-        },
-        SHORTAGE_MODE_REQUIRED: {
-          message: "برای صدور با موجودی کمتر از مقدار فروش، تأیید ثبت موجودی منفی لازم است.",
           status: 409,
         },
         PAYMENTS_NOT_EQUAL: {

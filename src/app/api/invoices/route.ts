@@ -443,13 +443,6 @@ export async function POST(request: NextRequest) {
         );
       }
     }
-    if (data.type === "SALE" && !data.contactId && !data.contactSnapshot) {
-      return NextResponse.json(
-        { message: "مشتری را انتخاب یا اطلاعات مشتری موقت را وارد کنید." },
-        { status: 400 },
-      );
-    }
-
     const extraCosts = currencyInputToRial(data.extraCosts, business.currencyUnit);
     const discountPercent = data.discountPercent === undefined || data.discountPercent === null
       ? null
@@ -483,6 +476,12 @@ export async function POST(request: NextRequest) {
         total,
       };
     });
+    if (data.type === "PURCHASE" && items.some((item) => item.unitPrice <= 0n)) {
+      return NextResponse.json(
+        { message: "قیمت واحد هر کالا در فاکتور خرید باید بیشتر از صفر باشد." },
+        { status: 400 },
+      );
+    }
 
     const subtotal = items.reduce(
       (sum, item) => sum + item.total,
@@ -526,19 +525,6 @@ export async function POST(request: NextRequest) {
       );
     }
     const ledgerAmount = total - paymentTotal;
-    const immediatelyPaidTotal = data.payments.reduce(
-      (sum, payment) => payment.method === "LEDGER" || payment.method === "CHECK"
-        ? sum
-        : sum + currencyInputToRial(payment.amount, business.currencyUnit),
-      0n,
-    );
-    if (data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
-      return NextResponse.json(
-        { message: "برای ثبت بدهی یا چک تسویه‌نشده، مشتری دارای حساب را انتخاب کنید." },
-        { status: 400 },
-      );
-    }
-
     const contactSnapshot = data.contactId
       ? await prisma.contact.findFirst({
           where: { id: data.contactId, businessId },

@@ -503,7 +503,7 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
               }
             }}
           >
-            <div className="my-auto w-full max-w-xl rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
+            <div className="my-auto flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
               <div className="flex items-center justify-between border-b border-[#222d38] p-5">
                 <div>
                   <h2 className="text-lg font-bold">ایجاد کسب‌وکار جدید</h2>
@@ -521,7 +521,7 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
                 </button>
               </div>
 
-              <form onSubmit={createBusiness} className="space-y-5 p-5">
+              <form onSubmit={createBusiness} className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
                 <div>
                   <p className="mb-3 text-sm font-semibold text-green-400">
                     اطلاعات کسب‌وکار
@@ -620,7 +620,7 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
               }
             }}
           >
-            <div className="my-auto w-full max-w-xl rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
+            <div className="my-auto flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
               <div className="flex items-center justify-between border-b border-[#222d38] p-5">
                 <div>
                   <h2 className="text-lg font-bold">ویرایش کسب‌وکار</h2>
@@ -639,7 +639,7 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
                 </button>
               </div>
 
-              <form onSubmit={updateBusiness} className="space-y-5 p-5">
+              <form onSubmit={updateBusiness} className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5">
                 <div>
                   <p className="mb-3 text-sm font-semibold text-green-400">
                     اطلاعات کسب‌وکار

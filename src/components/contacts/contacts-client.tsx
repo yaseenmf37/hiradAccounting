@@ -167,7 +167,7 @@ function Modal({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-[#293642] bg-[#17232d] shadow-2xl">
+      <div className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#293642] bg-[#17232d] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[#293642] px-5 py-4">
           <h2 className="font-bold text-white">{title}</h2>
           <button
@@ -178,7 +178,7 @@ function Modal({
             <X size={19} />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
       </div>
     </div>
   );

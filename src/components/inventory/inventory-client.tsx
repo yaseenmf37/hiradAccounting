@@ -48,14 +48,8 @@ type Movement = {
 
 type Backorder = {
   id: string;
-  outstanding: string;
-  requested: string;
-  fulfilled: string;
-  inventoryDeducted: boolean;
-  cancelledAt: string | null;
+  shortage: string;
   product: { name: string; unit: string; stock: string };
-  invoice: { invoiceNumber: string };
-  customerName: string | null;
 };
 
 type CurrencyUnit = "RIAL" | "TOMAN";
@@ -159,8 +153,6 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
   const [bulkPriceField, setBulkPriceField] = useState<"PURCHASE" | "SALE">("SALE");
   const [bulkPercent, setBulkPercent] = useState("");
   const [backorders, setBackorders] = useState<Backorder[]>([]);
-  const [allocatingId, setAllocatingId] = useState("");
-  const [allocationQuantity, setAllocationQuantity] = useState("1");
   const [productTotal, setProductTotal] = useState(0);
   const [productStats, setProductStats] = useState({
     total: 0,
@@ -316,28 +308,6 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "افزایش گروهی قیمت ناموفق بود.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function allocateBackorder(backorder: Backorder) {
-    setSaving(true);
-    setError("");
-    try {
-      const response = await fetch("/api/backorders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ backorderId: backorder.id, quantity: allocationQuantity }),
-      });
-      await readResponse(response);
-      setAllocatingId("");
-      setAllocationQuantity("1");
-      setSuccess("موجودی به سفارش قبلی تخصیص یافت.");
-      await loadData();
-      backorderPaging.resetPages();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "تخصیص موجودی انجام نشد.");
     } finally {
       setSaving(false);
     }
@@ -535,6 +505,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       setMovementDescription("");
       setSuccess("گردش موجودی با موفقیت ثبت شد.");
       await loadData();
+      await loadBackorders();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "ثبت گردش موجودی انجام نشد.",
@@ -620,6 +591,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
             type="button"
             onClick={() => {
               void loadData();
+              void loadBackorders();
               backorderPaging.resetPages();
             }}
             disabled={loading}
@@ -1023,36 +995,20 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       {backorderTotal > 0 && (
         <div className="rounded-2xl border border-amber-500/20 bg-[#111820]">
           <div className="border-b border-[#222d38] p-5">
-            <h2 className="font-bold text-white">کسری سفارش‌های فروش</h2>
-            <p className="mt-1 text-xs text-slate-400">موجودی منفی فعلی و مانده تأمین هر سفارش در همین فهرست پیگیری می‌شود. {formatNumber(backorderTotal)} مورد</p>
+            <h2 className="font-bold text-white">کسری موجودی</h2>
+            <p className="mt-1 text-xs text-slate-400">کالاهایی که موجودی انبارشان منفی است نمایش داده می‌شوند؛ با ورود موجودی، مقدار کسری به‌طور خودکار کاهش می‌یابد. {formatNumber(backorderTotal)} کالا</p>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-right text-sm">
-              <thead className="text-xs text-slate-500"><tr><th className="p-4">فاکتور / مشتری</th><th className="p-4">کالا</th><th className="p-4">موجودی فعلی</th><th className="p-4">سفارش</th><th className="p-4">تأمین‌شده</th><th className="p-4">مانده کسری</th><th className="p-4">عملیات</th></tr></thead>
+            <table className="w-full min-w-[520px] text-right text-sm">
+              <thead className="text-xs text-slate-500"><tr><th className="p-4">کالا</th><th className="p-4">موجودی فعلی</th><th className="p-4">مقدار کسری</th></tr></thead>
               <tbody>
                 {backorders.map((entry) => (
                   <tr key={entry.id} className="border-t border-[#222d38] text-slate-300">
-                    <td className="p-4">{entry.invoice.invoiceNumber}{entry.customerName ? ` — ${entry.customerName}` : ""}</td>
                     <td className="p-4">{entry.product.name}</td>
-                    <td className={`p-4 ${Number(entry.product.stock) < 0 ? "text-rose-400" : "text-slate-400"}`}>
-                      {formatNumber(Math.min(Number(entry.product.stock), 0))} {entry.product.unit}
+                    <td className="p-4 text-rose-400">
+                      {formatNumber(entry.product.stock)} {entry.product.unit}
                     </td>
-                    <td className="p-4">{formatNumber(entry.requested)} {entry.product.unit}</td>
-                    <td className="p-4">{formatNumber(entry.fulfilled)} {entry.product.unit}</td>
-                    <td className="p-4 text-amber-400">{formatNumber(entry.outstanding)} {entry.product.unit}</td>
-                    <td className="p-4">
-                      {entry.inventoryDeducted ? (
-                        <span className="text-xs text-slate-500">با ورود موجودی به‌صورت خودکار تسویه می‌شود</span>
-                      ) : allocatingId === entry.id ? (
-                        <div className="flex gap-2">
-                          <NumericInput min="0.001" max={entry.outstanding} step="0.001" value={allocationQuantity} onChange={(event) => setAllocationQuantity(event.target.value)} className="w-24 rounded border border-[#293642] bg-[#0b0f14] px-2 py-1" />
-                          <button disabled={saving} onClick={() => void allocateBackorder(entry)} className="text-green-400">تخصیص</button>
-                          <button onClick={() => setAllocatingId("")} className="text-slate-400">لغو</button>
-                        </div>
-                      ) : (
-                        <button disabled={Number(entry.product.stock) <= 0} onClick={() => { setAllocatingId(entry.id); setAllocationQuantity(entry.outstanding); }} className="text-blue-400 disabled:opacity-40">تخصیص موجودی</button>
-                      )}
-                    </td>
+                    <td className="p-4 text-amber-400">{formatNumber(entry.shortage)} {entry.product.unit}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1582,7 +1538,7 @@ function Modal({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="my-auto w-full max-w-2xl rounded-2xl border border-[#293642] bg-[#111820] p-6 shadow-2xl">
+      <div className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-[#293642] bg-[#111820] shadow-2xl">
         <div className="mb-6 flex items-center justify-between">
           <h2 className="text-lg font-bold text-white">{title}</h2>
 
@@ -1595,7 +1551,7 @@ function Modal({
           </button>
         </div>
 
-        {children}
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">{children}</div>
       </div>
     </div>
   );

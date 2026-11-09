@@ -563,7 +563,7 @@ export async function PATCH(
           throw new Error("CONTACT_NOT_FOUND");
         }
       }
-      if (data.type === "SALE" && !data.contactId && !data.contactSnapshot) {
+      if (existing.status !== "DRAFT" && data.type === "SALE" && !data.contactId && !data.contactSnapshot) {
         throw new Error("CUSTOMER_REQUIRED");
       }
       const contactSnapshot = data.contactId
@@ -583,6 +583,9 @@ export async function PATCH(
         }
 
         const unitPrice = currencyInputToRial(item.unitPrice, business.currencyUnit);
+        if ((existing.status !== "DRAFT" || data.type === "PURCHASE") && unitPrice <= 0n) {
+          throw new Error("INVALID_UNIT_PRICE");
+        }
 
         const total = BigInt(
           quantity
@@ -645,7 +648,7 @@ export async function PATCH(
           : sum + currencyInputToRial(payment.amount, business.currencyUnit),
         0n,
       );
-      if (data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
+      if (existing.status !== "DRAFT" && data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
         throw new Error("CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT");
       }
       if (editingIssuedInvoice) {
@@ -1502,6 +1505,10 @@ export async function PATCH(
         },
         INVALID_QUANTITY: {
           message: "تعداد کالا باید بیشتر از صفر باشد.",
+          status: 400,
+        },
+        INVALID_UNIT_PRICE: {
+          message: "قیمت واحد هر کالا در فاکتور عادی باید بیشتر از صفر باشد.",
           status: 400,
         },
         INVALID_CURRENCY_AMOUNT: {

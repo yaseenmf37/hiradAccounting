@@ -302,7 +302,7 @@ function MonthlyProductDetailsModal({
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-3 sm:p-6"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4"
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -312,7 +312,7 @@ function MonthlyProductDetailsModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="monthly-product-details-title"
-        className="flex max-h-[90dvh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#15191e] shadow-2xl"
+        className="flex h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-2xl border border-white/10 bg-[#15191e] shadow-2xl"
         dir="rtl"
       >
         <header className="flex items-start justify-between gap-4 border-b border-white/[0.07] p-5">
