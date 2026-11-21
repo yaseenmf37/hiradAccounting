@@ -1148,21 +1148,6 @@ export async function PATCH(
           );
         }
         const revisedCostedQuantityByProduct = new Map(costedQuantityByProduct);
-        for (const backorder of existing.backorders) {
-          const revisedQuantity = afterByProduct.get(backorder.productId) ?? new Prisma.Decimal(0);
-          if (revisedQuantity.lessThan(backorder.fulfilled)) {
-            throw new Error("BACKORDER_HISTORY_UNSAFE");
-          }
-          const revisedOutstanding = revisedQuantity.sub(backorder.fulfilled);
-          await tx.backorder.update({
-            where: { id: backorder.id },
-            data: {
-              requested: revisedQuantity,
-              outstanding: revisedOutstanding,
-              cancelledAt: revisedOutstanding.isZero() ? backorder.cancelledAt ?? new Date() : null,
-            },
-          });
-        }
         for (const productId of allProductIds) {
           const delta = (afterByProduct.get(productId) ?? new Prisma.Decimal(0))
             .sub(beforeByProduct.get(productId) ?? new Prisma.Decimal(0));
@@ -1173,9 +1158,6 @@ export async function PATCH(
           });
           if (!product) throw new Error("PRODUCT_NOT_FOUND");
           const newStock = product.stock.sub(delta);
-          if (delta.greaterThan(0) && newStock.lessThan(0)) {
-            throw new Error("INSUFFICIENT_STOCK_TO_EDIT_SALE");
-          }
           let valueDelta: bigint;
           if (delta.greaterThan(0)) {
             const calculatedValue = BigInt(product.averageCost.mul(delta).toFixed(0, Prisma.Decimal.ROUND_HALF_UP));
@@ -1317,7 +1299,44 @@ export async function PATCH(
           }
         }
         for (const stale of remainingExisting) {
+          await tx.backorder.deleteMany({ where: { invoiceItemId: stale.id } });
           await tx.invoiceItem.delete({ where: { id: stale.id } });
+        }
+        const revisedItems = await tx.invoiceItem.findMany({
+          where: { invoiceId: existing.id },
+          select: { id: true, productId: true, quantity: true, costedQuantity: true },
+        });
+        for (const item of revisedItems) {
+          const outstanding = item.quantity.greaterThan(item.costedQuantity)
+            ? item.quantity.sub(item.costedQuantity)
+            : new Prisma.Decimal(0);
+          const existingBackorder = await tx.backorder.findUnique({
+            where: { invoiceItemId: item.id },
+            select: { id: true, fulfilled: true },
+          });
+          if (existingBackorder) {
+            await tx.backorder.update({
+              where: { id: existingBackorder.id },
+              data: {
+                requested: item.quantity,
+                outstanding,
+                cancelledAt: outstanding.isZero() ? new Date() : null,
+              },
+            });
+          } else if (outstanding.greaterThan(0)) {
+            await tx.backorder.create({
+              data: {
+                businessId,
+                invoiceId: existing.id,
+                invoiceItemId: item.id,
+                productId: item.productId,
+                requested: item.quantity,
+                fulfilled: item.costedQuantity,
+                outstanding,
+                inventoryDeducted: true,
+              },
+            });
+          }
         }
         const costingComplete = [...afterByProduct].every(
           ([productId, quantity]) =>
@@ -1489,12 +1508,8 @@ export async function PATCH(
           message: "مبلغ فاکتور از محدوده مجاز سامانه بیشتر است.",
           status: 400,
         },
-        INSUFFICIENT_STOCK_TO_EDIT_SALE: {
-          message: "موجودی برای افزایش مقدار فروش فاکتور صادرشده کافی نیست؛ ثبت موجودی منفی فقط هنگام صدور فاکتور فروش و با تأیید انجام می‌شود.",
-          status: 409,
-        },
         BACKORDER_EDIT_LOCKED: {
-          message: "مقدار کالای دارای کسری سفارش را نمی‌توان پس از تخصیص تغییر داد؛ برای اصلاح سوابق، ابتدا کسری را تعیین تکلیف کنید.",
+          message: "مقدار کالای دارای کسری سفارش نمی‌تواند کمتر از مقدار تخصیص‌یافته باشد؛ برای اصلاح سوابق، ابتدا تخصیص را تعیین تکلیف کنید.",
           status: 409,
         },
         BACKORDER_HISTORY_UNSAFE: {
