@@ -125,8 +125,8 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
       <header className="print-invoice-header">
         <div className="print-invoice-header-column print-invoice-seller">
           {(sellerPhone || sellerSurname) && (
-            <p>
-              {sellerSurname &&  sellerSurname} {" "} {sellerPhone && sellerPhone} 
+            <p className="whitespace-nowrap">
+              {sellerName || "-"} {sellerPhone || "-"}
             </p>
           )}
             <p>نام خریدار: {buyerName || "-"}</p>
