@@ -1456,10 +1456,10 @@ export async function PATCH(
           message: "فاکتور فروش دارای مرجوعی است؛ برای حفظ سوابق، ویرایش مستقیم آن مجاز نیست.",
           status: 409,
         },
-        // PURCHASE_HISTORY_UNSAFE: {
-        //   message: "به‌دلیل گردش‌های بعدی انبار یا ناهماهنگی سوابق خرید، ویرایش خودکار امن نیست.",
-        //   status: 409,
-        // },
+        PURCHASE_HISTORY_UNSAFE: {
+          message: "به‌دلیل گردش‌های بعدی انبار یا ناهماهنگی سوابق خرید، ویرایش خودکار امن نیست.",
+          status: 409,
+        },
         INVOICE_HAS_PAYMENTS: {
           message: "فاکتور دارای پرداخت ثبت‌شده است و نمی‌توان پیش‌نویس آن را جایگزین کرد.",
           status: 409,
@@ -1575,12 +1575,30 @@ export async function PATCH(
           { status: 409 },
         );
       }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        return NextResponse.json(
+          { message: "ویرایش فاکتور با یک سابقه تکراری یا هم‌زمان مواجه شد؛ اطلاعات را تازه‌سازی کنید." },
+          { status: 409 },
+        );
+      }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === "P2003" || error.code === "P2025")
+      ) {
+        return NextResponse.json(
+          { message: "سوابق وابسته فاکتور با ویرایش جدید سازگار نیست؛ اطلاعات را تازه‌سازی کنید." },
+          { status: 409 },
+        );
+      }
     }
 
     console.error("Update invoice error:", error);
 
     return NextResponse.json(
-      { message: "خطا در ویرایش پیش‌نویس." },
+      { message: error instanceof Error ? error.message : "خطا در ویرایش فاکتور." },
       { status: 500 }
     );
   }
