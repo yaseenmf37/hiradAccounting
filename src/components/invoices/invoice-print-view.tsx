@@ -37,7 +37,15 @@ export type InvoicePrintData = {
     phone?: string | null;
     address?: string | null;
   } | null;
-  business?: { name?: string | null; phone?: string | null } | null;
+  business?: {
+    name?: string | null;
+    phone?: string | null;
+    owner?: {
+      fullName?: string | null;
+      phone?: string | null;
+      phone2?: string | null;
+    } | null;
+  } | null;
   items?: InvoicePrintItem[] | null;
 };
 
@@ -93,13 +101,22 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
   const contactPhone = invoice.contactPhoneSnapshot ?? invoice.contact?.phone ?? "";
   const contactAddress =
     invoice.contactAddressSnapshot ?? invoice.contact?.address ?? "";
-  const sellerName = invoice.type === "SALE" ? businessName : contactName;
-  const sellerPhone =
-    invoice.type === "SALE" ? invoice.business?.phone ?? "" : contactPhone;
-  const customerName = invoice.type === "SALE" ? contactName : businessName;
-  const customerAddress = invoice.type === "SALE" ? contactAddress : "";
-  const buyerPhone =
-    invoice.type === "SALE" ? contactPhone : invoice.business?.phone ?? "";
+  const ownerName = invoice.business?.owner?.fullName ?? "";
+  const ownerPhones = [
+    invoice.business?.owner?.phone,
+    invoice.business?.owner?.phone2,
+  ].filter((phone): phone is string => Boolean(phone)).join("، ");
+  const sellerName = invoice.type === "SALE" ? ownerName : contactName;
+  const sellerNameParts = sellerName.trim().split(/\s+/).filter(Boolean);
+  const sellerSurname = sellerNameParts[sellerNameParts.length - 1] ?? "";
+  const sellerPhone = invoice.type === "SALE"
+    ? ownerPhones || invoice.business?.phone || ""
+    : contactPhone;
+  const buyerName = invoice.type === "SALE" ? contactName : businessName;
+  const buyerAddress = invoice.type === "SALE" ? contactAddress : "";
+  const buyerPhone = invoice.type === "SALE"
+    ? contactPhone
+    : ownerPhones || invoice.business?.phone || "";
 
   return (
     <section className="print-only print-invoice-root" dir="rtl">
@@ -108,14 +125,17 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
       </h1>
       <header className="print-invoice-header">
         <div className="print-invoice-header-column print-invoice-seller">
-          {sellerPhone && <p>شماره تماس فروشنده: {sellerPhone}</p>}
-          {sellerName && <p>نام فروشنده: {sellerName}</p>}
-          {customerName && <p>نام مشتری: {customerName}</p>}
-          {customerAddress && <p>آدرس مشتری: {customerAddress}</p>}
+          {(sellerPhone || sellerSurname) && (
+            <p>
+              شماره تماس: {sellerPhone || "—"}
+              {sellerSurname && ` — نام خانوادگی: ${sellerSurname}`}
+            </p>
+          )}
+          {buyerName && <p>نام خریدار: {buyerName}</p>}
+          {buyerPhone && <p>شماره تماس خریدار: {buyerPhone}</p>}
+          {buyerAddress && <p>آدرس خریدار: {buyerAddress}</p>}
         </div>
         <div className="print-invoice-header-column print-invoice-brand">
-          {businessName && <strong>{businessName}</strong>}
-          {buyerPhone && <p>شماره تماس خریدار: {buyerPhone}</p>}
           {invoice.description && <p>توضیحات فاکتور: {invoice.description}</p>}
         </div>
         <div className="print-invoice-header-column print-invoice-meta">

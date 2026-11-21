@@ -8,6 +8,8 @@ import { prisma } from "@/lib/prisma";
 const createBusinessSchema = z.object({
   businessName: z.string().trim().min(2).max(120),
   phone: z.string().trim().max(30).optional(),
+  ownerPhone: z.string().trim().max(30).optional(),
+  ownerPhone2: z.string().trim().max(30).optional(),
   ownerUsername: z
     .string()
     .trim()
@@ -49,6 +51,8 @@ export async function POST(request: NextRequest) {
     const {
       businessName,
       phone,
+      ownerPhone,
+      ownerPhone2,
       ownerUsername,
       ownerFullName,
       ownerPassword,
@@ -76,6 +80,8 @@ export async function POST(request: NextRequest) {
         data: {
           username: ownerUsername,
           fullName: ownerFullName,
+          phone: ownerPhone || null,
+          phone2: ownerPhone2 || null,
           passwordHash,
           role: "BUSINESS_OWNER",
           isActive: true,
@@ -109,6 +115,8 @@ export async function POST(request: NextRequest) {
           id: result.owner.id,
           username: result.owner.username,
           fullName: result.owner.fullName,
+          phone: result.owner.phone,
+          phone2: result.owner.phone2,
           mustChangePassword: result.owner.mustChangePassword,
         },
       },
@@ -169,6 +177,8 @@ export async function GET() {
             id: true,
             username: true,
             fullName: true,
+            phone: true,
+            phone2: true,
             isActive: true,
           },
         },

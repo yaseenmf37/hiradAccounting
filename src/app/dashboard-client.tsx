@@ -100,6 +100,8 @@ type DashboardUser = {
   id: string;
   username: string;
   fullName: string;
+  phone: string | null;
+  phone2: string | null;
   role: "SUPER_ADMIN" | "BUSINESS_OWNER";
   mustChangePassword: boolean;
   business: {
@@ -681,6 +683,11 @@ export default function DashboardClient({
                   ? "مدیر کل سیستم"
                   : user.business?.name ?? "حساب کسب‌وکار"}
               </p>
+              {(user.phone || user.phone2) && (
+                <p className="mt-1 text-xs text-slate-500" dir="ltr">
+                  {[user.phone, user.phone2].filter(Boolean).join(" · ")}
+                </p>
+              )}
             </div>
 
             <button
@@ -804,6 +811,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "inventory"}>
               <InventoryClient
                 currencyUnit={currencyUnit}
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 quickAction={
                   quickAction?.targetView === "inventory" &&
                   quickAction.action === "product"
@@ -854,6 +863,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "contacts"}>
               <ContactsClient
                 currencyUnit={currencyUnit}
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 quickAction={
                   quickAction?.targetView === "contacts" &&
                   quickAction.action === "contact"
@@ -868,6 +879,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "payments"}>
               <PaymentsClient
                 currencyUnit={currencyUnit}
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 quickAction={
                   quickAction?.targetView === "payments" &&
                   quickAction.action === "payment"
@@ -882,6 +895,8 @@ export default function DashboardClient({
             <section hidden={currentView !== "expenses"}>
               <ExpensesClient
                 currencyUnit={currencyUnit}
+                userId={user.id}
+                businessId={user.business?.id ?? ""}
                 quickAction={
                   quickAction?.targetView === "expenses" &&
                   quickAction.action === "expense"

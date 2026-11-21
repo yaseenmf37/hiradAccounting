@@ -114,6 +114,8 @@ export async function PUT(
     const schema = z.object({
       businessName: z.string().trim().min(2).max(120),
       phone: z.string().trim().max(30),
+      ownerPhone: z.string().trim().max(30).optional(),
+      ownerPhone2: z.string().trim().max(30).optional(),
       ownerUsername: z
         .string()
         .trim()
@@ -148,6 +150,8 @@ export async function PUT(
     const {
       businessName,
       phone,
+      ownerPhone,
+      ownerPhone2,
       ownerUsername,
       ownerFullName,
     } = validation.data;
@@ -180,6 +184,8 @@ export async function PUT(
         data: {
           username: ownerUsername,
           fullName: ownerFullName,
+          ...(ownerPhone !== undefined && { phone: ownerPhone || null }),
+          ...(ownerPhone2 !== undefined && { phone2: ownerPhone2 || null }),
         },
       }),
     ]);
@@ -197,4 +203,3 @@ export async function PUT(
     );
   }
 }
-

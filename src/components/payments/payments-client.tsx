@@ -26,6 +26,14 @@ import NumericInput from "@/components/shared/numeric-input";
 import useCursorPage from "@/hooks/use-cursor-page";
 import useDebouncedValue from "@/hooks/use-debounced-value";
 import type { QuickAction } from "@/lib/quick-actions";
+import {
+  enqueueOfflineOperation,
+  getCachedEndpointCollection,
+  getOfflineAccountKey,
+  getOfflineDependencyOperationIds,
+  getOfflineOutboxOperations,
+  isOfflineWorkspaceUnlocked,
+} from "@/lib/offline-storage";
 
 type CurrencyUnit = "RIAL" | "TOMAN";
 type PaymentType = "RECEIPT" | "PAYMENT";
@@ -35,7 +43,7 @@ type PaymentMethod =
   | "CARD_TO_CARD"
   | "BANK_TRANSFER"
   | "CHECK";
-type PaymentStatus = "CONFIRMED" | "CANCELLED";
+type PaymentStatus = "CONFIRMED" | "CANCELLED" | "PENDING";
 
 type Contact = {
   id: string;
@@ -74,6 +82,7 @@ type Payment = {
   paidAt: string;
   cancelledAt: string | null;
   cancelReason: string | null;
+  offlineSyncStatus?: string;
   contact?: { id: string; name: string } | null;
   invoice?: {
     id: string;
@@ -191,9 +200,13 @@ function Field({
 
 export default function PaymentsClient({
   currencyUnit,
+  userId,
+  businessId,
   quickAction,
 }: {
   currencyUnit: CurrencyUnit;
+  userId: string;
+  businessId: string;
   quickAction?: QuickAction | null;
 }) {
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -264,18 +277,157 @@ export default function PaymentsClient({
       paging.setNextCursor(paymentData.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده تراکنش‌های ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const [cachedPayments, cachedContacts, cachedInvoices, operations] =
+            await Promise.all([
+              getCachedEndpointCollection(account, "/api/payments", "payments"),
+              getCachedEndpointCollection(account, "/api/contacts", "contacts"),
+              getCachedEndpointCollection(account, "/api/invoices", "invoices"),
+              getOfflineOutboxOperations(account),
+            ]);
+          const contactsById = new Map(
+            (cachedContacts as Contact[]).map((contact) => [contact.id, contact]),
+          );
+          const invoicesById = new Map(
+            (cachedInvoices as Invoice[]).map((invoice) => [invoice.id, invoice]),
+          );
+          for (const operation of operations) {
+            const request = operation.payload as {
+              path?: unknown;
+              body?: Record<string, unknown>;
+              localInvoice?: Invoice;
+            };
+            if (operation.entityType === "contact" && request.path === "/api/contacts") {
+              const body = request.body;
+              if (body && typeof body.id === "string" && typeof body.name === "string") {
+                contactsById.set(body.id, {
+                  id: body.id,
+                  name: body.name,
+                  phone: typeof body.phone === "string" ? body.phone : null,
+                  email: typeof body.email === "string" ? body.email : null,
+                  type: body.type as Contact["type"],
+                });
+              }
+            }
+            if (operation.entityType === "invoice" && request.localInvoice) {
+              invoicesById.set(request.localInvoice.id, request.localInvoice);
+            }
+          }
+          const byId = new Map(
+            (cachedPayments as Payment[]).map((payment) => [payment.id, payment]),
+          );
+          for (const operation of operations) {
+            if (operation.entityType !== "payment") continue;
+            const request = operation.payload as {
+              path?: unknown;
+              body?: Record<string, unknown>;
+            };
+            const body = request.body;
+            if (
+              request.path !== "/api/payments" ||
+              !body ||
+              typeof body.id !== "string" ||
+              typeof body.amount !== "number" ||
+              typeof body.type !== "string" ||
+              typeof body.method !== "string"
+            ) continue;
+            const contactId = typeof body.contactId === "string" ? body.contactId : null;
+            const invoiceId = typeof body.invoiceId === "string" ? body.invoiceId : null;
+            const contact = contactId ? contactsById.get(contactId) : undefined;
+            const invoice = invoiceId ? invoicesById.get(invoiceId) : undefined;
+            byId.set(body.id, {
+              id: body.id,
+              contactId,
+              invoiceId,
+              type: body.type as PaymentType,
+              method: body.method as PaymentMethod,
+              status: operation.status === "synced" ? "CONFIRMED" : "PENDING",
+              amount: (BigInt(body.amount) * (currencyUnit === "TOMAN" ? 10n : 1n)).toString(),
+              trackingNumber: typeof body.trackingNumber === "string" ? body.trackingNumber : null,
+              checkNumber: typeof body.checkNumber === "string" ? body.checkNumber : null,
+              checkIssuedAt: typeof body.checkIssuedAt === "string" ? body.checkIssuedAt : null,
+              checkDueAt: typeof body.checkDueAt === "string" ? body.checkDueAt : null,
+              checkClearedAt: typeof body.checkClearedAt === "string" ? body.checkClearedAt : null,
+              payableTo: typeof body.payableTo === "string" ? body.payableTo : null,
+              destinationDetails: typeof body.destinationDetails === "string" ? body.destinationDetails : null,
+              description: typeof body.description === "string" ? body.description : null,
+              paidAt: typeof body.paidAt === "string" ? body.paidAt : operation.createdAt,
+              cancelledAt: null,
+              cancelReason: null,
+              contact: contact ? { id: contact.id, name: contact.name } : null,
+              invoice: invoice
+                ? {
+                    id: invoice.id,
+                    invoiceNumber: invoice.invoiceNumber,
+                    type: invoice.type,
+                    status: invoice.status,
+                    total: invoice.total,
+                  }
+                : null,
+              offlineSyncStatus: operation.status,
+            });
+          }
+          const query = debouncedSearch.trim().toLocaleLowerCase();
+          const filtered = [...byId.values()]
+            .filter((payment) => typeFilter === "ALL" || payment.type === typeFilter)
+            .filter((payment) => statusFilter === "ALL" || payment.status === statusFilter)
+            .filter((payment) =>
+              !query || JSON.stringify(payment).toLocaleLowerCase().includes(query)
+            )
+            .sort((left, right) => right.paidAt.localeCompare(left.paidAt));
+          const confirmed = filtered.filter((payment) => payment.status === "CONFIRMED");
+          const includedInTotals = confirmed.filter(
+            (payment) => payment.method !== "CHECK" || payment.checkClearedAt,
+          );
+          setPayments(filtered);
+          setTotalCount(filtered.length);
+          setServerStats({
+            receipts: includedInTotals
+              .filter((payment) => payment.type === "RECEIPT")
+              .reduce((sum, payment) => sum + BigInt(payment.amount), 0n).toString(),
+            payments: includedInTotals
+              .filter((payment) => payment.type === "PAYMENT")
+              .reduce((sum, payment) => sum + BigInt(payment.amount), 0n).toString(),
+            confirmedCount: confirmed.length,
+          });
+          paging.setNextCursor(null);
+          setError("");
+          return;
+        } catch (cacheError) {
+          console.error("Offline payment list load failed:", cacheError);
+        }
+      }
       setError(
         err instanceof Error ? err.message : "دریافت اطلاعات ناموفق بود."
       );
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor]);
+  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor, userId, businessId, currencyUnit]);
 
   useEffect(() => {
     const controller = new AbortController();
     void loadData(controller.signal);
     return () => controller.abort();
+  }, [loadData]);
+
+  useEffect(() => {
+    const refresh = () => void loadData();
+    window.addEventListener("online", refresh);
+    window.addEventListener("hirad-offline-workspace-unlocked", refresh);
+    window.addEventListener("hirad-offline-sync-succeeded", refresh);
+    window.addEventListener("hirad-offline-outbox-updated", refresh);
+    return () => {
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("hirad-offline-workspace-unlocked", refresh);
+      window.removeEventListener("hirad-offline-sync-succeeded", refresh);
+      window.removeEventListener("hirad-offline-outbox-updated", refresh);
+    };
   }, [loadData]);
 
   useEffect(() => {
@@ -330,11 +482,69 @@ export default function PaymentsClient({
         });
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
+        if (!navigator.onLine || err instanceof TypeError) {
+          try {
+            const account = getOfflineAccountKey(userId, businessId);
+            if (!isOfflineWorkspaceUnlocked(account)) {
+              throw new Error("برای انتخاب مخاطب و فاکتور، قفل محلی حساب را باز کنید.");
+            }
+            const [cachedContacts, cachedInvoices, operations] = await Promise.all([
+              getCachedEndpointCollection(account, "/api/contacts", "contacts"),
+              getCachedEndpointCollection(account, "/api/invoices", "invoices"),
+              getOfflineOutboxOperations(account),
+            ]);
+            const contactMap = new Map(
+              (cachedContacts as Contact[]).map((contact) => [contact.id, contact]),
+            );
+            const invoiceMap = new Map(
+              (cachedInvoices as Invoice[]).map((invoice) => [invoice.id, invoice]),
+            );
+            for (const operation of operations) {
+              const request = operation.payload as {
+                path?: unknown;
+                body?: Record<string, unknown>;
+                localInvoice?: Invoice;
+              };
+              if (operation.entityType === "contact" && request.path === "/api/contacts") {
+                const body = request.body;
+                if (body && typeof body.id === "string" && typeof body.name === "string") {
+                  contactMap.set(body.id, {
+                    id: body.id,
+                    name: body.name,
+                    type: body.type as Contact["type"],
+                    phone: typeof body.phone === "string" ? body.phone : null,
+                    email: typeof body.email === "string" ? body.email : null,
+                  });
+                }
+              }
+              if (operation.entityType === "invoice" && request.localInvoice) {
+                invoiceMap.set(request.localInvoice.id, request.localInvoice);
+              }
+            }
+            const contactQuery = debouncedContactSearch.trim().toLocaleLowerCase();
+            const invoiceQuery = debouncedInvoiceSearch.trim().toLocaleLowerCase();
+            setContacts([...contactMap.values()].filter((contact) =>
+              !contactQuery ||
+              `${contact.name} ${contact.phone ?? ""} ${contact.email ?? ""}`
+                .toLocaleLowerCase().includes(contactQuery)
+            ));
+            setInvoices([...invoiceMap.values()].filter((invoice) =>
+              invoice.status === "ISSUED" &&
+              (!invoiceQuery ||
+                invoice.invoiceNumber.toLocaleLowerCase().includes(invoiceQuery) ||
+                (invoice.contact?.name ?? "").toLocaleLowerCase().includes(invoiceQuery))
+            ));
+            setError("");
+            return;
+          } catch (cacheError) {
+            console.error("Offline payment form data load failed:", cacheError);
+          }
+        }
         setError(err instanceof Error ? err.message : "دریافت اطلاعات فرم ناموفق بود.");
       }
     })();
     return () => controller.abort();
-  }, [modalOpen, debouncedContactSearch, debouncedInvoiceSearch]);
+  }, [modalOpen, debouncedContactSearch, debouncedInvoiceSearch, userId, businessId]);
 
   function updateForm<K extends keyof PaymentForm>(
     key: K,
@@ -390,6 +600,8 @@ export default function PaymentsClient({
     setSaving(true);
     setError("");
     setSuccess("");
+    let pendingCreate: { id: string; body: Record<string, unknown> } | null = null;
+    let offlineEnqueued = false;
 
     try {
       const amount = Number(form.amount);
@@ -398,33 +610,75 @@ export default function PaymentsClient({
         throw new Error("مبلغ باید یک عدد صحیح و مثبت باشد.");
       }
 
+      if (!navigator.onLine && form.invoiceId && invoices.some(
+        (invoice) => invoice.id === form.invoiceId && invoice.status !== "ISSUED",
+      )) {
+        throw new Error("پرداخت فاکتور محلی تا زمان ثبت و صدور فاکتور در سرور مجاز نیست.");
+      }
+
+      const id = crypto.randomUUID();
+      const body = {
+        type: form.type,
+        method: form.method,
+        contactId: form.contactId || null,
+        invoiceId: form.invoiceId || null,
+        amount,
+        trackingNumber: form.trackingNumber.trim() || null,
+        checkNumber: form.method === "CHECK" ? form.checkNumber.trim() || null : null,
+        checkIssuedAt: form.method === "CHECK" ? form.checkIssuedAt || null : null,
+        checkDueAt: form.method === "CHECK" ? form.checkDueAt || null : null,
+        checkClearedAt: form.method === "CHECK" ? form.checkClearedAt || null : null,
+        payableTo: form.method === "CHECK" ? form.payableTo.trim() || null : null,
+        destinationDetails:
+          form.method === "CARD_TO_CARD" || form.method === "POS"
+            ? form.destinationDetails.trim() || null
+            : null,
+        description: form.description.trim() || null,
+        paidAt: new Date(form.paidAt).toISOString(),
+        id,
+      };
+      pendingCreate = { id, body };
+      const saveOfflinePayment = async () => {
+        if (!pendingCreate) throw new Error("شناسه پایدار تراکنش آفلاین ساخته نشد.");
+        const account = getOfflineAccountKey(userId, businessId);
+        if (!isOfflineWorkspaceUnlocked(account)) {
+          throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+        }
+        const dependsOnOperationIds = await getOfflineDependencyOperationIds(
+          account,
+          [form.contactId, form.invoiceId],
+        );
+        await enqueueOfflineOperation(account, {
+          entityType: "payment",
+          entityId: pendingCreate.id,
+          dependsOnOperationIds,
+          idempotencyKey: pendingCreate.id,
+          payload: { path: "/api/payments", method: "POST", body: pendingCreate.body },
+        });
+        offlineEnqueued = true;
+        setModalOpen(false);
+        setForm(emptyForm);
+        setSuccess("تراکنش روی این دستگاه در انتظار همگام‌سازی است؛ هنوز در مانده حساب ثبت نهایی نشده است.");
+        await loadData();
+      };
+      if (!navigator.onLine) {
+        await saveOfflinePayment();
+        return;
+      }
+
       const response = await fetch("/api/payments", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: form.type,
-          method: form.method,
-          contactId: form.contactId || null,
-          invoiceId: form.invoiceId || null,
-          amount,
-          trackingNumber: form.trackingNumber.trim() || null,
-          checkNumber: form.method === "CHECK" ? form.checkNumber.trim() || null : null,
-          checkIssuedAt: form.method === "CHECK" ? form.checkIssuedAt || null : null,
-          checkDueAt: form.method === "CHECK" ? form.checkDueAt || null : null,
-          checkClearedAt: form.method === "CHECK" ? form.checkClearedAt || null : null,
-          payableTo: form.method === "CHECK" ? form.payableTo.trim() || null : null,
-          destinationDetails:
-            form.method === "CARD_TO_CARD" || form.method === "POS"
-              ? form.destinationDetails.trim() || null
-              : null,
-          description: form.description.trim() || null,
-          paidAt: new Date(form.paidAt).toISOString(),
-        }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": id },
+        body: JSON.stringify(body),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status >= 500) {
+          await saveOfflinePayment();
+          return;
+        }
         throw new Error(data.error || "ثبت تراکنش ناموفق بود.");
       }
 
@@ -433,6 +687,37 @@ export default function PaymentsClient({
       setSuccess("تراکنش با موفقیت ثبت شد.");
       await loadData();
     } catch (err) {
+      if (
+        !offlineEnqueued &&
+        pendingCreate &&
+        (!navigator.onLine || err instanceof TypeError)
+      ) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+          }
+          const dependsOnOperationIds = await getOfflineDependencyOperationIds(
+            account,
+            [form.contactId, form.invoiceId],
+          );
+          await enqueueOfflineOperation(account, {
+            entityType: "payment",
+            entityId: pendingCreate.id,
+            dependsOnOperationIds,
+            idempotencyKey: pendingCreate.id,
+            payload: { path: "/api/payments", method: "POST", body: pendingCreate.body },
+          });
+          setModalOpen(false);
+          setForm(emptyForm);
+          setSuccess("تراکنش روی این دستگاه در انتظار همگام‌سازی است؛ هنوز در مانده حساب ثبت نهایی نشده است.");
+          await loadData();
+          return;
+        } catch (offlineError) {
+          setError(offlineError instanceof Error ? offlineError.message : "ذخیره آفلاین تراکنش ناموفق بود.");
+          return;
+        }
+      }
       setError(err instanceof Error ? err.message : "ثبت تراکنش ناموفق بود.");
     } finally {
       setSaving(false);
@@ -620,6 +905,7 @@ export default function PaymentsClient({
             <option value="ALL">همه وضعیت‌ها</option>
             <option value="CONFIRMED">تأییدشده</option>
             <option value="CANCELLED">لغوشده</option>
+            <option value="PENDING">در انتظار همگام‌سازی</option>
           </select>
 
           <button
@@ -741,12 +1027,16 @@ export default function PaymentsClient({
                         className={`rounded-lg px-2.5 py-1 text-xs ${
                           payment.status === "CONFIRMED"
                             ? "bg-green-500/10 text-green-400"
-                            : "bg-red-500/10 text-red-400"
+                            : payment.status === "PENDING"
+                              ? "bg-amber-500/10 text-amber-300"
+                              : "bg-red-500/10 text-red-400"
                         }`}
                       >
                         {payment.status === "CONFIRMED"
                           ? "تأییدشده"
-                          : "لغوشده"}
+                          : payment.status === "PENDING"
+                            ? "در انتظار همگام‌سازی"
+                            : "لغوشده"}
                       </span>
                     </td>
 

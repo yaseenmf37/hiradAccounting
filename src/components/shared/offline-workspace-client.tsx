@@ -139,6 +139,8 @@ export default function OfflineWorkspaceClient() {
         id: workspace.userId,
         username: "",
         fullName: workspace.businessName,
+        phone: null,
+        phone2: null,
         role: "BUSINESS_OWNER",
         mustChangePassword: false,
         business: {

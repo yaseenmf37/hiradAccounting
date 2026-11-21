@@ -69,6 +69,8 @@ export async function POST(request: NextRequest) {
         id: user.id,
         username: user.username,
         fullName: user.fullName,
+        phone: user.phone,
+        phone2: user.phone2,
         role: user.role,
         mustChangePassword: user.mustChangePassword,
         business: user.business

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -49,13 +49,19 @@ function restoreEnvironment() {
   }
 }
 
-test("development config selects separate local Supabase targets without printing them", () => {
+test("development config allows DATABASE_URL and DIRECT_URL to target different projects", () => {
   restoreEnvironment();
   inTemporaryDirectory(() => {
+    const envPath = path.join(process.cwd(), ".env.development.local");
+    const contents = readFileSync(envPath, "utf8").replace(
+      /^DIRECT_URL=.*$/m,
+      'DIRECT_URL="postgresql://postgres.directref@db.directref.supabase.co:5432/postgres"',
+    );
+    writeFileSync(envPath, contents);
     configureDevelopmentDatabaseEnvironment();
     assert.equal(process.env.HIRAD_DATABASE_ENV, "development");
     assert.match(process.env.DATABASE_URL, /devref/);
-    assert.match(process.env.DIRECT_URL, /devref/);
+    assert.match(process.env.DIRECT_URL, /directref/);
   });
   restoreEnvironment();
 });

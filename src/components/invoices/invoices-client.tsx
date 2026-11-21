@@ -23,6 +23,7 @@ import InvoicePrintView from "@/components/invoices/invoice-print-view";
 import {
   enqueueOfflineOperation,
   getCachedEndpointCollection,
+  getOfflineDependencyOperationIds,
   getOfflineAccountKey,
   getOfflineOutboxOperations,
   isOfflineWorkspaceUnlocked,
@@ -116,6 +117,7 @@ type Invoice = {
   offlineOperationId?: string;
   offlineSyncStatus?: "pending" | "syncing" | "failed" | "synced";
   offlineSyncError?: string | null;
+  offlineDetailsIncomplete?: boolean;
   costingRecordedAt?: string | null;
   id: string;
   invoiceNumber: string;
@@ -138,7 +140,15 @@ type Invoice = {
     phone?: string | null;
     address?: string | null;
   } | null;
-  business?: { name: string; phone: string | null };
+  business?: {
+    name: string;
+    phone: string | null;
+    owner?: {
+      fullName: string;
+      phone: string | null;
+      phone2: string | null;
+    };
+  };
   payments?: {
     allocationBatchId?: string | null;
     method: string;
@@ -1082,9 +1092,31 @@ export default function InvoicesClient({
   (sum, item) => sum + BigInt(item.costOfGoodsSold ?? "0"),
   0n
 ) ?? 0n;
+  const detailCostingIncomplete = detailInvoice?.type === "SALE" &&
+    detailInvoice.items.some(
+      (item) =>
+        parseQuantityUnits(item.costedQuantity ?? "0") <
+        parseQuantityUnits(item.quantity),
+    );
 
-const detailGrossProfit = detailInvoice
-  ? BigInt(detailInvoice.total) - detailCostOfGoodsSold
+const detailReturnedSales = detailInvoice?.salesReturns?.reduce(
+  (sum, salesReturn) => sum + BigInt(salesReturn.total),
+  0n,
+) ?? 0n;
+const detailReturnedCost = detailInvoice?.salesReturns?.reduce(
+  (sum, salesReturn) =>
+    sum + salesReturn.items.reduce(
+      (itemSum, item) => itemSum + BigInt(item.inventoryCost),
+      0n,
+    ),
+  0n,
+) ?? 0n;
+const detailNetProfit = detailInvoice
+  ? BigInt(detailInvoice.total) -
+    BigInt(detailInvoice.extraCosts) -
+    detailCostOfGoodsSold -
+    detailReturnedSales +
+    detailReturnedCost
   : 0n;
   const submitInvoice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1227,9 +1259,15 @@ const detailGrossProfit = detailInvoice
           offlineSyncError: null,
         };
         const key = createInvoiceRequestRef.current.key;
-        await enqueueOfflineOperation(getOfflineAccountKey(userId, businessId), {
+        const account = getOfflineAccountKey(userId, businessId);
+        const dependsOnOperationIds = await getOfflineDependencyOperationIds(
+          account,
+          [contactId],
+        );
+        await enqueueOfflineOperation(account, {
           entityType: "invoice",
           entityId: id,
+          dependsOnOperationIds,
           idempotencyKey: key,
           payload: {
             path: "/api/invoices",
@@ -1400,7 +1438,7 @@ const detailGrossProfit = detailInvoice
   };
 
   const deleteInvoice = async (invoice: Invoice) => {
-    if (invoice.type !== "PURCHASE") return;
+    if (invoice.status !== "DRAFT") return;
     if (!window.confirm(`پیش‌نویس ${invoice.invoiceNumber} حذف شود؟`)) return;
 
     setSaving(true);
@@ -1432,6 +1470,36 @@ const detailGrossProfit = detailInvoice
       ]);
       setDetailInvoice({ ...data.invoice, revisions: revisionData.revisions ?? [] });
     } catch (err) {
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده جزئیات ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const cachedInvoices = await getCachedEndpointCollection(
+            account,
+            "/api/invoices",
+            "invoices",
+          ) as Invoice[];
+          const cachedInvoice = cachedInvoices.find((entry) => entry.id === invoice.id);
+          if (!cachedInvoice && !invoice.offlineOperationId) {
+            throw new Error("جزئیات این فاکتور در آخرین snapshot ذخیره نشده است.");
+          }
+          setDetailInvoice({
+            ...(cachedInvoice ?? invoice),
+            offlineDetailsIncomplete: true,
+          });
+          setError("");
+          return;
+        } catch (cacheError) {
+          setError(
+            cacheError instanceof Error
+              ? cacheError.message
+              : "جزئیات آفلاین فاکتور در دسترس نیست.",
+          );
+          return;
+        }
+      }
       setError(err instanceof Error ? err.message : "خطا در دریافت جزئیات.");
     }
   };
@@ -1835,14 +1903,14 @@ const detailGrossProfit = detailInvoice
                             >
                               <CheckCircle2 size={17} />
                             </button>
-                            {invoice.type === "PURCHASE" && <button
+                            <button
                               title="حذف"
                               disabled={saving}
                               onClick={() => void deleteInvoice(invoice)}
                               className="rounded-lg p-2 text-red-400 hover:bg-red-500/10"
                             >
                               <Trash2 size={17} />
-                            </button>}
+                            </button>
                           </>
                         )}
                         {!invoice.offlineSyncStatus && invoice.status === "ISSUED" && (
@@ -2411,6 +2479,11 @@ const detailGrossProfit = detailInvoice
             </div>
 
             <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+              {detailInvoice.offlineDetailsIncomplete && (
+                <p className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-xs leading-6 text-amber-200">
+                  این اطلاعات از snapshot محلی نمایش داده می‌شود. سوابق ویرایش، پرداخت‌ها و مرجوعی‌هایی که هنگام دریافت snapshot ذخیره نشده‌اند در دسترس نیستند.
+                </p>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <span className={`rounded-lg px-3 py-1.5 text-xs ${statusClass(detailInvoice.status)}`}>
                   {statusLabel(detailInvoice.status)}
@@ -2512,11 +2585,16 @@ const detailGrossProfit = detailInvoice
                       <span>{formatMoney(detailCostOfGoodsSold, currencyUnit)}</span>
                     </div>
                     <div className="flex justify-between border-t border-[#263341] pt-3 font-bold">
-                      <span className="text-slate-300">سود ناخالص</span>
-                      <span className={detailGrossProfit >= 0n ? "text-green-400" : "text-red-400"}>
-                        {formatMoney(detailGrossProfit, currencyUnit)}
+                      <span className="text-slate-300">سود خالص پس از تخفیف، هزینه جانبی و مرجوعی</span>
+                      <span className={detailNetProfit >= 0n ? "text-green-400" : "text-red-400"}>
+                        {formatMoney(detailNetProfit, currencyUnit)}
                       </span>
                     </div>
+                    {detailCostingIncomplete && (
+                      <p className="text-xs text-amber-300">
+                        بهای تمام‌شده بخشی از کالاها هنوز نهایی نشده است؛ سود نمایش‌داده‌شده موقت است.
+                      </p>
+                    )}
                   </>
                 )}
                 <div className="flex justify-between border-t border-[#263341] pt-3 font-bold text-white">

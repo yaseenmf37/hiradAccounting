@@ -11,6 +11,11 @@ import NumericInput from "@/components/shared/numeric-input";
 import useCursorPage from "@/hooks/use-cursor-page";
 import useDebouncedValue from "@/hooks/use-debounced-value";
 import type { QuickAction } from "@/lib/quick-actions";
+import {
+  getCachedEndpointCollection,
+  getOfflineAccountKey,
+  isOfflineWorkspaceUnlocked,
+} from "@/lib/offline-storage";
 
 type Product = {
   id: string;
@@ -53,7 +58,12 @@ type Backorder = {
 };
 
 type CurrencyUnit = "RIAL" | "TOMAN";
-type Props = { currencyUnit: CurrencyUnit; quickAction?: QuickAction | null };
+type Props = {
+  currencyUnit: CurrencyUnit;
+  userId: string;
+  businessId: string;
+  quickAction?: QuickAction | null;
+};
 
 type ProductForm = {
   name: string;
@@ -122,7 +132,12 @@ async function readResponse(response: Response) {
   return data;
 }
 
-export default function InventoryClient({ currencyUnit, quickAction }: Props) {
+export default function InventoryClient({
+  currencyUnit,
+  userId,
+  businessId,
+  quickAction,
+}: Props) {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [search, setSearch] = useState("");
@@ -206,6 +221,45 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       productPaging.setNextCursor(productsData.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده اطلاعات ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const cached = await getCachedEndpointCollection(
+            account,
+            "/api/products",
+            "products",
+          ) as Product[];
+          const localProducts = cached
+            .filter((product) => statusFilter === "all" || product.isActive)
+            .filter((product) => categoryFilter === "all" || product.categoryId === categoryFilter)
+            .filter((product) => {
+              const query = debouncedSearch.trim().toLocaleLowerCase();
+              return !query || `${product.name} ${product.sku ?? ""} ${product.barcode ?? ""}`
+                .toLocaleLowerCase().includes(query);
+            });
+          setProducts(localProducts);
+          setProductTotal(localProducts.length);
+          setProductStats({
+            total: localProducts.filter((product) => product.isActive).length,
+            lowStock: localProducts.filter(
+              (product) => product.isActive && Number(product.stock) <= Number(product.minStock),
+            ).length,
+            archived: localProducts.filter((product) => !product.isActive).length,
+            inventoryValue: localProducts.reduce(
+              (sum, product) => sum + BigInt(product.inventoryValue || "0"),
+              0n,
+            ).toString(),
+          });
+          productPaging.setNextCursor(null);
+          setError("");
+          return;
+        } catch (cacheError) {
+          console.error("Offline product list load failed:", cacheError);
+        }
+      }
       setError(
         err instanceof Error
           ? err.message
@@ -230,9 +284,29 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       backorderPaging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده اطلاعات ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const cached = await getCachedEndpointCollection(
+            account,
+            "/api/backorders",
+            "backorders",
+          ) as Backorder[];
+          setBackorders(cached);
+          setBackorderTotal(cached.length);
+          backorderPaging.setNextCursor(null);
+          setError("");
+          return;
+        } catch (cacheError) {
+          console.error("Offline backorder list load failed:", cacheError);
+        }
+      }
       setError(err instanceof Error ? err.message : "دریافت کسری سفارش‌ها ناموفق بود.");
     }
-  }, [backorderPaging.cursor, backorderPaging.setNextCursor]);
+  }, [backorderPaging.cursor, backorderPaging.setNextCursor, userId, businessId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -252,11 +326,28 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
         setCategories(Array.isArray(data) ? data : data.categories ?? []);
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
+        if (!navigator.onLine || err instanceof TypeError) {
+          try {
+            const account = getOfflineAccountKey(userId, businessId);
+            if (!isOfflineWorkspaceUnlocked(account)) {
+              throw new Error("برای مشاهده دسته‌بندی‌های ذخیره‌شده، قفل محلی حساب را باز کنید.");
+            }
+            const cached = await getCachedEndpointCollection(
+              account,
+              "/api/categories",
+              "categories",
+            );
+            setCategories(cached as Category[]);
+            return;
+          } catch (cacheError) {
+            console.error("Offline categories could not be loaded:", cacheError);
+          }
+        }
         setError(err instanceof Error ? err.message : "دریافت دسته‌بندی‌ها ناموفق بود.");
       }
     })();
     return () => controller.abort();
-  }, []);
+  }, [userId, businessId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -369,15 +460,21 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
       const data = await readResponse(response);
       const created = data.category ?? data;
 
-      await loadData();
-
-      if (created.id) {
+      if (created.id && created.name) {
+        setCategories((current) =>
+          current.some((category) => category.id === created.id)
+            ? current
+            : [...current, { id: created.id, name: created.name }].sort((left, right) =>
+                left.name.localeCompare(right.name),
+              ),
+        );
         setForm((previous) => ({
           ...previous,
           categoryId: created.id,
         }));
       }
 
+      await loadData();
       setCategoryName("");
       setCategoryModalOpen(false);
       setSuccess("دسته‌بندی با موفقیت ایجاد شد.");
@@ -429,7 +526,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
   }
 
   async function archiveProduct(product: Product) {
-    if (!window.confirm(`آیا از آرشیو کردن «${product.name}» مطمئن هستید؟`)) {
+    if (!window.confirm(`کالای «${product.name}» حذف شود؟ در صورت وجود سابقه فاکتور یا گردش انبار، کالا به‌صورت امن آرشیو خواهد شد.`)) {
       return;
     }
 
@@ -441,12 +538,12 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
         method: "DELETE",
       });
 
-      await readResponse(response);
+      const data = await readResponse(response);
 
-      setSuccess("کالا با موفقیت آرشیو شد.");
+      setSuccess(data.message ?? "کالا با موفقیت حذف یا آرشیو شد.");
       await loadData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "آرشیو کالا انجام نشد.");
+      setError(err instanceof Error ? err.message : "حذف کالا انجام نشد.");
     }
   }
 
@@ -921,7 +1018,7 @@ export default function InventoryClient({ currencyUnit, quickAction }: Props) {
 
                               <button
                                 type="button"
-                                title="آرشیو کالا"
+                                title="حذف کالا (با سابقه، آرشیو می‌شود)"
                                 onClick={() => void archiveProduct(product)}
                                 className="rounded-lg border border-[#293642] p-2 text-red-400 hover:border-red-500/50"
                               >

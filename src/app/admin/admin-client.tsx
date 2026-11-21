@@ -29,6 +29,8 @@ type Business = {
     id: string;
     username: string;
     fullName: string;
+    phone: string | null;
+    phone2: string | null;
     isActive: boolean;
   };
   _count: {
@@ -43,6 +45,8 @@ type FormData = {
   phone: string;
   ownerUsername: string;
   ownerFullName: string;
+  ownerPhone: string;
+  ownerPhone2: string;
   ownerPassword: string;
 };
 
@@ -51,6 +55,8 @@ const initialForm: FormData = {
   phone: "",
   ownerUsername: "",
   ownerFullName: "",
+  ownerPhone: "",
+  ownerPhone2: "",
   ownerPassword: "",
 };
 
@@ -76,6 +82,8 @@ export default function AdminClient({
     phone: "",
     ownerUsername: "",
     ownerFullName: "",
+    ownerPhone: "",
+    ownerPhone2: "",
   }); 
 
   const loadBusinesses = useCallback(async () => {
@@ -118,6 +126,8 @@ export default function AdminClient({
         business.owner.fullName,
         business.owner.username,
         business.phone ?? "",
+        business.owner.phone ?? "",
+        business.owner.phone2 ?? "",
       ].some((value) => value.toLowerCase().includes(query))
     );
   }, [businesses, search]);
@@ -221,6 +231,8 @@ function openEditModal(business: Business) {
     phone: business.phone ?? "",
     ownerUsername: business.owner.username,
     ownerFullName: business.owner.fullName,
+    ownerPhone: business.owner.phone ?? "",
+    ownerPhone2: business.owner.phone2 ?? "",
   });
 
   setEditingBusiness(business);
@@ -414,6 +426,13 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
                       </td>
                       <td className="px-5 py-4">
                         {business.owner.fullName}
+                        {(business.owner.phone || business.owner.phone2) && (
+                          <p className="mt-1 text-xs text-slate-500" dir="ltr">
+                            {[business.owner.phone, business.owner.phone2]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          </p>
+                        )}
                       </td>
                       <td className="px-5 py-4 text-slate-400" dir="ltr">
                         {business.owner.username}
@@ -563,6 +582,20 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
                       required
                       dir="ltr"
                     />
+                    <Field
+                      label="شماره تماس اول مدیر"
+                      value={form.ownerPhone}
+                      onChange={(value) => setForm({ ...form, ownerPhone: value })}
+                      placeholder="اختیاری"
+                      dir="ltr"
+                    />
+                    <Field
+                      label="شماره تماس دوم مدیر"
+                      value={form.ownerPhone2}
+                      onChange={(value) => setForm({ ...form, ownerPhone2: value })}
+                      placeholder="اختیاری"
+                      dir="ltr"
+                    />
                     <div className="sm:col-span-2">
                       <Field
                         label="رمز عبور اولیه"
@@ -691,6 +724,24 @@ async function updateBusiness(event: React.FormEvent<HTMLFormElement>) {
                       }
                       placeholder="username"
                       required
+                      dir="ltr"
+                    />
+                    <Field
+                      label="شماره تماس اول مدیر"
+                      value={editForm.ownerPhone}
+                      onChange={(value) =>
+                        setEditForm({ ...editForm, ownerPhone: value })
+                      }
+                      placeholder="اختیاری"
+                      dir="ltr"
+                    />
+                    <Field
+                      label="شماره تماس دوم مدیر"
+                      value={editForm.ownerPhone2}
+                      onChange={(value) =>
+                        setEditForm({ ...editForm, ownerPhone2: value })
+                      }
+                      placeholder="اختیاری"
                       dir="ltr"
                     />
                   </div>

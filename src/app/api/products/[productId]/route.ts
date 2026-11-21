@@ -258,7 +258,7 @@ export async function PATCH(
   }
 }
 
-// آرشیو کالا
+// حذف کالا؛ کالاهای دارای سابقه یا موجودی برای حفظ سوابق آرشیو می‌شوند.
 export async function DELETE(
   _request: NextRequest,
   { params }: RouteContext
@@ -270,18 +270,50 @@ export async function DELETE(
 
     const { productId } = await params;
 
-    const result = await prisma.product.updateMany({
-      where: {
-        id: productId,
-        businessId: auth.businessId!,
-        isActive: true,
-      },
-      data: {
-        isActive: false,
-      },
+    const result = await prisma.$transaction(async (tx) => {
+      const product = await tx.product.findFirst({
+        where: {
+          id: productId,
+          businessId: auth.businessId!,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          stock: true,
+          inventoryValue: true,
+          _count: {
+            select: {
+              movements: true,
+              invoiceItems: true,
+              purchaseReturnItems: true,
+              salesReturnItems: true,
+              priceHistory: true,
+              backorders: true,
+            },
+          },
+        },
+      });
+
+      if (!product) return "NOT_FOUND" as const;
+
+      const hasHistory = Object.values(product._count).some((count) => count > 0);
+      if (
+        !hasHistory &&
+        product.stock.isZero() &&
+        product.inventoryValue === 0n
+      ) {
+        await tx.product.delete({ where: { id: product.id } });
+        return "DELETED" as const;
+      }
+
+      await tx.product.update({
+        where: { id: product.id },
+        data: { isActive: false },
+      });
+      return "ARCHIVED" as const;
     });
 
-    if (result.count === 0) {
+    if (result === "NOT_FOUND") {
       return NextResponse.json(
         { message: "کالا پیدا نشد یا قبلاً آرشیو شده است." },
         { status: 404 }
@@ -289,13 +321,25 @@ export async function DELETE(
     }
 
     return NextResponse.json({
-      message: "کالا با موفقیت آرشیو شد.",
+      message: result === "DELETED"
+        ? "کالای بدون موجودی و سابقه با موفقیت حذف شد."
+        : "کالا به‌دلیل داشتن موجودی یا سابقه، برای حفظ اطلاعات آرشیو شد.",
     });
   } catch (error) {
-    console.error("Archive product error:", error);
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2003"
+    ) {
+      return NextResponse.json(
+        { message: "کالا هم‌زمان در سابقه‌ای ثبت شده است؛ فهرست را تازه‌سازی کنید." },
+        { status: 409 },
+      );
+    }
+
+    console.error("Delete product error:", error);
 
     return NextResponse.json(
-      { message: "خطا در آرشیو کالا." },
+      { message: "خطا در حذف یا آرشیو کالا." },
       { status: 500 }
     );
   }

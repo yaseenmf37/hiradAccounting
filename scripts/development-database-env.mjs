@@ -29,18 +29,6 @@ function databaseIdentity(value) {
   }
 }
 
-function projectReference(value) {
-  try {
-    const url = new URL(value);
-    const directMatch = url.hostname.match(/^db\.([^.]+)\.supabase\.(?:co|com)$/i);
-    if (directMatch) return directMatch[1].toLowerCase();
-    const poolerMatch = decodeURIComponent(url.username).match(/^postgres\.([^.]+)$/i);
-    return poolerMatch?.[1]?.toLowerCase() ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export function configureDevelopmentDatabaseEnvironment({
   forceDevelopment = false,
   command: requestedCommand,
@@ -127,14 +115,6 @@ export function configureDevelopmentDatabaseEnvironment({
         );
       }
     }
-  }
-
-  const runtimeProject = projectReference(development.DATABASE_URL);
-  const directProject = projectReference(development.DIRECT_URL);
-  if (runtimeProject && directProject && runtimeProject !== directProject) {
-    throw new Error(
-      `${developmentEnvPath} DATABASE_URL and DIRECT_URL refer to different Supabase projects.`,
-    );
   }
 
   for (const name of ["DATABASE_URL", "DIRECT_URL"]) {

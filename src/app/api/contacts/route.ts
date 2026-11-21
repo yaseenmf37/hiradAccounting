@@ -28,6 +28,7 @@ async function authorize() {
 }
 
 const contactSchema = z.object({
+  id: z.string().uuid().optional(),
   name: z.string().trim().min(2).max(150),
   type: z.enum(["CUSTOMER", "SUPPLIER", "BOTH"]).default("BOTH"),
   phone: z.string().trim().max(30).optional().nullable(),
@@ -171,18 +172,84 @@ export async function POST(request: NextRequest) {
     }
 
     const data = validation.data;
+    const idempotencyKey = request.headers.get("Idempotency-Key")?.trim();
+    if (
+      (idempotencyKey && (idempotencyKey.length < 16 || idempotencyKey.length > 128)) ||
+      (idempotencyKey && data.id !== idempotencyKey) ||
+      (data.id && !idempotencyKey)
+    ) {
+      return NextResponse.json(
+        { message: "کلید تکرارناپذیری عملیات مخاطب معتبر نیست." },
+        { status: 400 },
+      );
+    }
 
-    const contact = await prisma.contact.create({
-      data: {
-        businessId: auth.businessId!,
-        name: data.name,
-        type: data.type,
-        phone: data.phone || null,
-        email: data.email || null,
-        address: data.address || null,
-        description: data.description || null,
-      },
-    });
+    const contactData = {
+      businessId: auth.businessId!,
+      name: data.name,
+      type: data.type,
+      phone: data.phone || null,
+      email: data.email || null,
+      address: data.address || null,
+      description: data.description || null,
+    };
+    const matchesRequest = (contact: {
+      name: string;
+      type: ContactType;
+      phone: string | null;
+      email: string | null;
+      address: string | null;
+      description: string | null;
+    }) =>
+      contact.name === contactData.name &&
+      contact.type === contactData.type &&
+      contact.phone === contactData.phone &&
+      contact.email === contactData.email &&
+      contact.address === contactData.address &&
+      contact.description === contactData.description;
+
+    if (data.id) {
+      const existing = await prisma.contact.findFirst({
+        where: { id: data.id, businessId: auth.businessId! },
+      });
+      if (existing) {
+        if (!matchesRequest(existing)) {
+          return NextResponse.json(
+            { message: "کلید عملیات مخاطب قبلاً با اطلاعات دیگری استفاده شده است." },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json({ message: "مخاطب قبلاً ثبت شده است.", contact: existing });
+      }
+    }
+
+    let contact;
+    try {
+      contact = await prisma.contact.create({
+        data: { ...contactData, ...(data.id ? { id: data.id } : {}) },
+      });
+    } catch (error) {
+      if (
+        data.id &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        const existing = await prisma.contact.findFirst({
+          where: { id: data.id, businessId: auth.businessId! },
+        });
+        if (existing && matchesRequest(existing)) {
+          return NextResponse.json({
+            message: "مخاطب قبلاً ثبت شده است.",
+            contact: existing,
+          });
+        }
+        return NextResponse.json(
+          { message: "کلید عملیات مخاطب قبلاً استفاده شده است." },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
 
     return NextResponse.json(
       {

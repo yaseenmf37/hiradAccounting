@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type FormEvent,
+} from "react";
 import {
   Users,
   Plus,
@@ -30,6 +36,13 @@ import CursorPagination from "@/components/shared/cursor-pagination";
 import useCursorPage from "@/hooks/use-cursor-page";
 import useDebouncedValue from "@/hooks/use-debounced-value";
 import type { QuickAction } from "@/lib/quick-actions";
+import {
+  enqueueOfflineOperation,
+  getCachedEndpointCollection,
+  getOfflineAccountKey,
+  getOfflineOutboxOperations,
+  isOfflineWorkspaceUnlocked,
+} from "@/lib/offline-storage";
 
 
 type ContactType = "CUSTOMER" | "SUPPLIER" | "BOTH";
@@ -49,6 +62,7 @@ type Contact = {
     invoices: number;
     payments: number;
   };
+  offlineSyncStatus?: string;
 };
 
 type ContactForm = {
@@ -224,13 +238,31 @@ function toEnglishDigits(value: string): string {
   );
 }
 
+function subscribeToConnection(onChange: () => void) {
+  window.addEventListener("online", onChange);
+  window.addEventListener("offline", onChange);
+  return () => {
+    window.removeEventListener("online", onChange);
+    window.removeEventListener("offline", onChange);
+  };
+}
+
 export default function ContactsClient({
   currencyUnit,
+  userId,
+  businessId,
   quickAction,
 }: {
   currencyUnit: "RIAL" | "TOMAN";
+  userId: string;
+  businessId: string;
   quickAction?: QuickAction | null;
 }) {
+  const isOnline = useSyncExternalStore(
+    subscribeToConnection,
+    () => navigator.onLine,
+    () => true,
+  );
   
 function formatLedgerAmount(amount: string) {
   const value = BigInt(amount);
@@ -282,11 +314,18 @@ function formatLedgerAmount(amount: string) {
       quickAction?.action !== "contact" ||
       quickAction.targetView !== "contacts"
     ) return;
-    setEditingContact(null);
-    setForm({ ...emptyForm, type: "CUSTOMER" });
-    setError("");
-    setModalOpen(true);
-  }, [quickAction?.requestId, quickAction?.action]);
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      setEditingContact(null);
+      setForm({ ...emptyForm, type: "CUSTOMER" });
+      setError("");
+      setModalOpen(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [quickAction?.requestId, quickAction?.action, quickAction?.targetView]);
 
   const loadContacts = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -319,18 +358,109 @@ function formatLedgerAmount(amount: string) {
       paging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده مخاطبین ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const [cached, operations] = await Promise.all([
+            getCachedEndpointCollection(account, "/api/contacts", "contacts"),
+            getOfflineOutboxOperations(account),
+          ]);
+          const cachedContacts = cached as Contact[];
+          const byId = new Map(cachedContacts.map((contact) => [contact.id, contact]));
+          for (const operation of operations) {
+            if (operation.entityType !== "contact") continue;
+            const request = operation.payload as {
+              path?: unknown;
+              body?: Record<string, unknown>;
+            };
+            if (request.path !== "/api/contacts" || !request.body) continue;
+            const body = request.body;
+            if (typeof body.id !== "string" || typeof body.name !== "string") continue;
+            byId.set(body.id, {
+              id: body.id,
+              name: body.name,
+              type: body.type as ContactType,
+              phone: typeof body.phone === "string" ? body.phone : null,
+              email: typeof body.email === "string" ? body.email : null,
+              address: typeof body.address === "string" ? body.address : null,
+              description: typeof body.description === "string" ? body.description : null,
+              isActive: true,
+              createdAt: operation.createdAt,
+              _count: { invoices: 0, payments: 0 },
+              offlineSyncStatus: operation.status,
+            });
+          }
+          const query = debouncedSearch.trim().toLocaleLowerCase();
+          const matchesType = (contact: Contact) =>
+            typeFilter === "ALL" ||
+            contact.type === typeFilter ||
+            ((typeFilter === "CUSTOMER" || typeFilter === "SUPPLIER") &&
+              contact.type === "BOTH");
+          const filtered = [...byId.values()]
+            .filter((contact) => statusFilter === "all" || contact.isActive)
+            .filter(matchesType)
+            .filter((contact) =>
+              !query ||
+              `${contact.name} ${contact.phone ?? ""} ${contact.email ?? ""}`
+                .toLocaleLowerCase().includes(query)
+            )
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+          const statsContacts = [...byId.values()]
+            .filter(matchesType)
+            .filter((contact) => !query ||
+              `${contact.name} ${contact.phone ?? ""} ${contact.email ?? ""}`
+                .toLocaleLowerCase().includes(query));
+          setContacts(filtered);
+          setTotalCount(filtered.length);
+          setListStats({
+            active: statsContacts.filter((contact) => contact.isActive).length,
+            customers: statsContacts.filter((contact) =>
+              (statusFilter === "all" || contact.isActive) &&
+              (contact.type === "CUSTOMER" || contact.type === "BOTH")
+            ).length,
+            suppliers: statsContacts.filter((contact) =>
+              (statusFilter === "all" || contact.isActive) &&
+              (contact.type === "SUPPLIER" || contact.type === "BOTH")
+            ).length,
+          });
+          paging.setNextCursor(null);
+          setError("");
+          return;
+        } catch (cacheError) {
+          console.error("Offline contact list load failed:", cacheError);
+        }
+      }
       setError(
         err instanceof Error ? err.message : "دریافت مخاطبین ناموفق بود."
       );
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
-  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor]);
+  }, [debouncedSearch, typeFilter, statusFilter, paging.cursor, paging.setNextCursor, userId, businessId]);
 
   useEffect(() => {
     const controller = new AbortController();
-    void loadContacts(controller.signal);
+    queueMicrotask(() => {
+      if (!controller.signal.aborted) void loadContacts(controller.signal);
+    });
     return () => controller.abort();
+  }, [loadContacts]);
+
+  useEffect(() => {
+    const refresh = () => void loadContacts();
+    window.addEventListener("online", refresh);
+    window.addEventListener("hirad-offline-workspace-unlocked", refresh);
+    window.addEventListener("hirad-offline-sync-succeeded", refresh);
+    window.addEventListener("hirad-offline-outbox-updated", refresh);
+    return () => {
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("hirad-offline-workspace-unlocked", refresh);
+      window.removeEventListener("hirad-offline-sync-succeeded", refresh);
+      window.removeEventListener("hirad-offline-outbox-updated", refresh);
+    };
   }, [loadContacts]);
 
   function updateForm<K extends keyof ContactForm>(
@@ -363,9 +493,15 @@ function formatLedgerAmount(amount: string) {
 
   async function submitContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!isOnline && editingContact) {
+      setError("ویرایش مخاطب بدون اینترنت به‌دلیل نبود کنترل تعارض امن، غیرفعال است.");
+      return;
+    }
     setSaving(true);
     setError("");
     setSuccess("");
+    let pendingCreate: { id: string; body: Record<string, unknown> } | null = null;
+    let offlineEnqueued = false;
 
     try {
       const payload = {
@@ -376,20 +512,59 @@ function formatLedgerAmount(amount: string) {
         description: form.description.trim() || null,
       };
 
+      const createId = editingContact ? null : crypto.randomUUID();
+      const requestPayload = createId ? { ...payload, id: createId } : payload;
+      if (createId) pendingCreate = { id: createId, body: requestPayload };
+      const saveOfflineContact = async () => {
+        if (!pendingCreate || editingContact) {
+          throw new Error("ویرایش مخاطب بدون اتصال برای جلوگیری از تعارض پشتیبانی نمی‌شود.");
+        }
+        const account = getOfflineAccountKey(userId, businessId);
+        if (!isOfflineWorkspaceUnlocked(account)) {
+          throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+        }
+        await enqueueOfflineOperation(account, {
+          entityType: "contact",
+          entityId: pendingCreate.id,
+          idempotencyKey: pendingCreate.id,
+          payload: {
+            path: "/api/contacts",
+            method: "POST",
+            body: pendingCreate.body,
+          },
+        });
+        offlineEnqueued = true;
+        setModalOpen(false);
+        setEditingContact(null);
+        setForm(emptyForm);
+        setSuccess("مخاطب روی این دستگاه ذخیره شد؛ تا همگام‌سازی با سرور، ثبت نهایی نشده است.");
+        await loadContacts();
+      };
+      if (!navigator.onLine && !editingContact) {
+        await saveOfflineContact();
+        return;
+      }
       const response = await fetch(
         editingContact
           ? `/api/contacts/${editingContact.id}`
           : "/api/contacts",
         {
           method: editingContact ? "PATCH" : "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          headers: {
+            "Content-Type": "application/json",
+            ...(createId ? { "Idempotency-Key": createId } : {}),
+          },
+          body: JSON.stringify(requestPayload),
         }
       );
 
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status >= 500 && pendingCreate) {
+          await saveOfflineContact();
+          return;
+        }
         throw new Error(data.message || "ذخیره مخاطب ناموفق بود.");
       }
 
@@ -404,6 +579,38 @@ function formatLedgerAmount(amount: string) {
 
       await loadContacts();
     } catch (err) {
+      if (
+        !offlineEnqueued &&
+        pendingCreate &&
+        !editingContact &&
+        (!navigator.onLine || err instanceof TypeError)
+      ) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+          }
+          await enqueueOfflineOperation(account, {
+            entityType: "contact",
+            entityId: pendingCreate.id,
+            idempotencyKey: pendingCreate.id,
+            payload: {
+              path: "/api/contacts",
+              method: "POST",
+              body: pendingCreate.body,
+            },
+          });
+          setModalOpen(false);
+          setEditingContact(null);
+          setForm(emptyForm);
+          setSuccess("مخاطب روی این دستگاه ذخیره شد؛ تا همگام‌سازی با سرور، ثبت نهایی نشده است.");
+          await loadContacts();
+          return;
+        } catch (offlineError) {
+          setError(offlineError instanceof Error ? offlineError.message : "ذخیره آفلاین مخاطب ناموفق بود.");
+          return;
+        }
+      }
       setError(err instanceof Error ? err.message : "ذخیره مخاطب ناموفق بود.");
     } finally {
       setSaving(false);
@@ -796,6 +1003,11 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
                       <div className="font-medium text-white">
                         {contact.name}
                       </div>
+                      {contact.offlineSyncStatus && contact.offlineSyncStatus !== "synced" && (
+                        <div className="mt-1 text-xs text-amber-400">
+                          در انتظار همگام‌سازی؛ ثبت نهایی نشده است
+                        </div>
+                      )}
                       {contact.address && (
                         <div className="mt-1 flex items-center gap-1 text-xs text-slate-500">
                           <MapPin size={12} />
@@ -996,6 +1208,11 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
             </Field>
 
             <div className="flex justify-end gap-3 border-t border-[#293642] pt-4">
+              {!isOnline && editingContact && (
+                <p role="status" className="ml-auto text-sm text-amber-400">
+                  ویرایش مخاطب آفلاین غیرفعال است؛ برای جلوگیری از بازنویسی تغییرات هم‌زمان، آنلاین شوید.
+                </p>
+              )}
               <button
                 type="button"
                 onClick={() => {
@@ -1010,7 +1227,7 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
 
               <button
                 type="submit"
-                disabled={saving}
+                disabled={saving || (!isOnline && Boolean(editingContact))}
                 className="flex items-center gap-2 rounded-xl bg-green-500 px-5 py-3 text-sm font-bold text-black hover:bg-green-400 disabled:opacity-50"
               >
                 {saving && <Loader2 size={16} className="animate-spin" />}

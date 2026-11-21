@@ -94,6 +94,7 @@ function serializeInvoice(invoice: {
   extraCosts: bigint;
   discount: bigint;
   total: bigint;
+  costingRecordedAt?: Date | null;
   description: string | null;
   issuedAt: Date | null;
   createdAt: Date;
@@ -103,7 +104,11 @@ function serializeInvoice(invoice: {
     phone?: string | null;
     address?: string | null;
   } | null;
-  business?: { name: string; phone: string | null };
+  business?: {
+    name: string;
+    phone: string | null;
+    owner?: { fullName: string; phone: string | null; phone2: string | null };
+  };
   payments?: {
     allocationBatchId?: string | null;
     method: string;
@@ -190,6 +195,7 @@ function serializeInvoice(invoice: {
     extraCosts: invoice.extraCosts.toString(),
     discount: invoice.discount.toString(),
     total: invoice.total.toString(),
+    costingRecordedAt: invoice.costingRecordedAt?.toISOString() ?? null,
     payments: invoice.payments?.map((payment) => ({
       ...payment,
       amount: payment.amount.toString(),
@@ -263,7 +269,13 @@ export async function GET(
           select: { id: true, name: true, phone: true, address: true },
         },
         business: {
-          select: { name: true, phone: true },
+          select: {
+            name: true,
+            phone: true,
+            owner: {
+              select: { fullName: true, phone: true, phone2: true },
+            },
+          },
         },
         payments: {
           where: { status: { in: ["CONFIRMED", "PENDING"] } },
@@ -1566,28 +1578,78 @@ export async function DELETE(
 
     const { invoiceId } = await context.params;
 
-    const result = await prisma.invoice.deleteMany({
-      where: {
-        id: invoiceId,
-        businessId: auth.businessId,
-        status: "DRAFT",
-        type: "PURCHASE",
-      },
-    });
+    await prisma.$transaction(async (tx) => {
+      const lockedInvoices = await tx.$queryRaw<{ id: string }[]>`
+        SELECT "id"
+        FROM "Invoice"
+        WHERE "id" = ${invoiceId}
+          AND "businessId" = ${auth.businessId}
+          AND "status" = 'DRAFT'::"InvoiceStatus"
+        FOR UPDATE
+      `;
+      const lockedInvoice = lockedInvoices[0];
+      if (!lockedInvoice) throw new Error("DRAFT_NOT_FOUND");
 
-    if (result.count === 0) {
-      return NextResponse.json(
-        {
-          message: "فاکتور پیدا نشد یا امکان حذف آن وجود ندارد.",
+      const relations = await tx.invoice.findUnique({
+        where: { id: lockedInvoice.id },
+        select: {
+          _count: {
+            select: {
+              payments: true,
+              movements: true,
+              backorders: true,
+              revisions: true,
+              purchaseReturns: true,
+              salesReturns: true,
+            },
+          },
         },
-        { status: 404 }
-      );
-    }
+      });
+      if (
+        !relations ||
+        Object.entries(relations._count)
+          .some(([relation, count]) => relation !== "payments" && count > 0)
+      ) {
+        throw new Error("DRAFT_HAS_FINANCIAL_HISTORY");
+      }
+
+      const historicalPayments = await tx.payment.count({
+        where: {
+          invoiceId: lockedInvoice.id,
+          status: { not: "PENDING" },
+        },
+      });
+      if (historicalPayments > 0) {
+        throw new Error("DRAFT_HAS_FINANCIAL_HISTORY");
+      }
+
+      await tx.payment.deleteMany({
+        where: { invoiceId: lockedInvoice.id, status: "PENDING" },
+      });
+      await tx.invoiceItem.deleteMany({
+        where: { invoiceId: lockedInvoice.id },
+      });
+      await tx.invoice.delete({
+        where: { id: lockedInvoice.id },
+      });
+    });
 
     return NextResponse.json({
       message: "پیش‌نویس با موفقیت حذف شد.",
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "DRAFT_NOT_FOUND") {
+      return NextResponse.json(
+        { message: "پیش‌نویس پیدا نشد یا امکان حذف آن وجود ندارد." },
+        { status: 404 },
+      );
+    }
+    if (error instanceof Error && error.message === "DRAFT_HAS_FINANCIAL_HISTORY") {
+      return NextResponse.json(
+        { message: "این پیش‌نویس دارای سابقه مالی یا انبار است و برای حفظ سوابق حذف نمی‌شود." },
+        { status: 409 },
+      );
+    }
     console.error("Delete invoice error:", error);
 
     return NextResponse.json(

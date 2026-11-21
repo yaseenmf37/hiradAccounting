@@ -24,6 +24,13 @@ import useCursorPage from "@/hooks/use-cursor-page";
 import useDebouncedValue from "@/hooks/use-debounced-value";
 import type { QuickAction } from "@/lib/quick-actions";
 import {
+  enqueueOfflineOperation,
+  getCachedEndpointCollection,
+  getOfflineAccountKey,
+  getOfflineOutboxOperations,
+  isOfflineWorkspaceUnlocked,
+} from "@/lib/offline-storage";
+import {
   ExpenseCategory,
   PaymentMethod,
   ExpenseStatus,
@@ -37,12 +44,13 @@ type Expense = {
   category: ExpenseCategory;
   amount: string;
   method: PaymentMethod;
-  status: ExpenseStatus;
+  status: ExpenseStatus | "PENDING";
   description: string | null;
   spentAt: string;
   createdAt: string;
   cancelledAt: string | null;
   cancelReason: string | null;
+  offlineSyncStatus?: string;
 };
 
 const categories: { value: ExpenseCategory; label: string }[] = [
@@ -158,14 +166,19 @@ const initialForm = {
 
 export default function ExpensesClient({
   currencyUnit,
+  userId,
+  businessId,
   quickAction,
 }: {
   currencyUnit: CurrencyUnit;
+  userId: string;
+  businessId: string;
   quickAction?: QuickAction | null;
 }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
@@ -229,6 +242,74 @@ export default function ExpensesClient({
       paging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
+      if (!navigator.onLine || err instanceof TypeError) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای مشاهده هزینه‌های ذخیره‌شده، قفل محلی حساب را باز کنید.");
+          }
+          const [cached, operations] = await Promise.all([
+            getCachedEndpointCollection(account, "/api/expenses", "expenses"),
+            getOfflineOutboxOperations(account),
+          ]);
+          const byId = new Map(
+            (cached as Expense[]).map((expense) => [expense.id, expense]),
+          );
+          for (const operation of operations) {
+            if (operation.entityType !== "expense") continue;
+            const request = operation.payload as {
+              path?: unknown;
+              body?: Record<string, unknown>;
+            };
+            const body = request.body;
+            if (
+              request.path !== "/api/expenses" ||
+              !body ||
+              typeof body.id !== "string" ||
+              typeof body.title !== "string" ||
+              typeof body.amount !== "number"
+            ) continue;
+            byId.set(body.id, {
+              id: body.id,
+              title: body.title,
+              category: body.category as ExpenseCategory,
+              amount: (BigInt(body.amount) * (currencyUnit === "TOMAN" ? 10n : 1n)).toString(),
+              method: body.method as PaymentMethod,
+              status: operation.status === "synced" ? "CONFIRMED" : "PENDING",
+              description: typeof body.description === "string" ? body.description : null,
+              spentAt: typeof body.spentAt === "string" ? body.spentAt : operation.createdAt,
+              createdAt: operation.createdAt,
+              cancelledAt: null,
+              cancelReason: null,
+              offlineSyncStatus: operation.status,
+            });
+          }
+          const query = debouncedSearch.trim().toLocaleLowerCase();
+          const filtered = [...byId.values()]
+            .filter((expense) => statusFilter === "ALL" || expense.status === statusFilter)
+            .filter((expense) => categoryFilter === "ALL" || expense.category === categoryFilter)
+            .filter((expense) =>
+              !query || `${expense.title} ${expense.description ?? ""}`
+                .toLocaleLowerCase().includes(query)
+            )
+            .filter((expense) => {
+              if (!appliedFilters) return true;
+              const date = expense.spentAt.slice(0, 10);
+              const start = startDate ? getGregorianDate(startDate) : null;
+              const end = endDate ? getGregorianDate(endDate) : null;
+              return (!start || date >= start) && (!end || date <= end);
+            })
+            .sort((left, right) => right.spentAt.localeCompare(left.spentAt));
+          setExpenses(filtered);
+          setTotalCount(filtered.length);
+          setServerStats(null);
+          paging.setNextCursor(null);
+          setError("");
+          return;
+        } catch (cacheError) {
+          console.error("Offline expense list load failed:", cacheError);
+        }
+      }
       setError(
         err instanceof Error ? err.message : "خطا در دریافت هزینه‌ها.",
       );
@@ -244,12 +325,29 @@ export default function ExpensesClient({
     endDate,
     paging.cursor,
     paging.setNextCursor,
+    userId,
+    businessId,
+    currencyUnit,
   ]);
 
   useEffect(() => {
     const controller = new AbortController();
     void loadExpenses(controller.signal);
     return () => controller.abort();
+  }, [loadExpenses]);
+
+  useEffect(() => {
+    const refresh = () => void loadExpenses();
+    window.addEventListener("online", refresh);
+    window.addEventListener("hirad-offline-workspace-unlocked", refresh);
+    window.addEventListener("hirad-offline-sync-succeeded", refresh);
+    window.addEventListener("hirad-offline-outbox-updated", refresh);
+    return () => {
+      window.removeEventListener("online", refresh);
+      window.removeEventListener("hirad-offline-workspace-unlocked", refresh);
+      window.removeEventListener("hirad-offline-sync-succeeded", refresh);
+      window.removeEventListener("hirad-offline-outbox-updated", refresh);
+    };
   }, [loadExpenses]);
 
   const stats = useMemo(() => {
@@ -314,32 +412,94 @@ export default function ExpensesClient({
 
     setSaving(true);
     setError("");
+    let pendingCreate: { id: string; body: Record<string, unknown> } | null = null;
+    let offlineEnqueued = false;
 
     try {
-      const response = await fetch(
-        editing ? `/api/expenses/${editing.id}` : "/api/expenses",
-        {
-          method: editing ? "PATCH" : "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            ...form,
-            amount: Number(form.amount),
-            spentAt: new Date(
-              `${form.spentAt}T12:00:00.000Z`,
-            ).toISOString(),
-          }),
+      if (!navigator.onLine && editing) {
+        throw new Error("ویرایش هزینه بدون اتصال برای جلوگیری از تعارض پشتیبانی نمی‌شود.");
+      }
+      const createId = editing ? null : crypto.randomUUID();
+      const body = {
+        ...form,
+        amount: Number(form.amount),
+        spentAt: new Date(`${form.spentAt}T12:00:00.000Z`).toISOString(),
+        ...(createId ? { id: createId } : {}),
+      };
+      if (createId) pendingCreate = { id: createId, body };
+      const saveOfflineExpense = async () => {
+        if (!pendingCreate) {
+          throw new Error("ویرایش هزینه آفلاین پشتیبانی نمی‌شود.");
+        }
+        const account = getOfflineAccountKey(userId, businessId);
+        if (!isOfflineWorkspaceUnlocked(account)) {
+          throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+        }
+        await enqueueOfflineOperation(account, {
+          entityType: "expense",
+          entityId: pendingCreate.id,
+          idempotencyKey: pendingCreate.id,
+          payload: { path: "/api/expenses", method: "POST", body: pendingCreate.body },
+        });
+        offlineEnqueued = true;
+        setModalOpen(false);
+        setEditing(null);
+        setSuccess("هزینه روی این دستگاه ذخیره شد؛ تا همگام‌سازی با سرور، ثبت نهایی نشده است.");
+        await loadExpenses();
+      };
+      if (!navigator.onLine && !editing) {
+        await saveOfflineExpense();
+        return;
+      }
+
+      const response = await fetch(editing ? `/api/expenses/${editing.id}` : "/api/expenses", {
+        method: editing ? "PATCH" : "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(createId ? { "Idempotency-Key": createId } : {}),
         },
-      );
+        body: JSON.stringify(body),
+      });
 
       const data = await response.json();
 
       if (!response.ok) {
+        if (response.status >= 500 && pendingCreate) {
+          await saveOfflineExpense();
+          return;
+        }
         throw new Error(data.error || "ذخیره هزینه انجام نشد.");
       }
 
       setModalOpen(false);
       await loadExpenses();
     } catch (err) {
+      if (
+        !offlineEnqueued &&
+        pendingCreate &&
+        (!navigator.onLine || err instanceof TypeError)
+      ) {
+        try {
+          const account = getOfflineAccountKey(userId, businessId);
+          if (!isOfflineWorkspaceUnlocked(account)) {
+            throw new Error("برای نگهداری امن عملیات آفلاین، ابتدا قفل محلی حساب را باز کنید.");
+          }
+          await enqueueOfflineOperation(account, {
+            entityType: "expense",
+            entityId: pendingCreate.id,
+            idempotencyKey: pendingCreate.id,
+            payload: { path: "/api/expenses", method: "POST", body: pendingCreate.body },
+          });
+          setModalOpen(false);
+          setEditing(null);
+          setSuccess("هزینه روی این دستگاه ذخیره شد؛ تا همگام‌سازی با سرور، ثبت نهایی نشده است.");
+          await loadExpenses();
+          return;
+        } catch (offlineError) {
+          setError(offlineError instanceof Error ? offlineError.message : "ذخیره آفلاین هزینه ناموفق بود.");
+          return;
+        }
+      }
       setError(err instanceof Error ? err.message : "خطا در ذخیره هزینه.");
     } finally {
       setSaving(false);
@@ -532,6 +692,11 @@ export default function ExpensesClient({
           </button>
         </div>
       )}
+      {success && (
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-amber-200">
+          {success}
+        </div>
+      )}
 
       <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#151b26]">
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-4">
@@ -598,6 +763,10 @@ export default function ExpensesClient({
                         <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/10 px-2.5 py-1.5 text-xs text-emerald-400">
                           <CheckCircle2 size={14} />
                           تأییدشده
+                        </span>
+                      ) : expense.status === "PENDING" ? (
+                        <span className="rounded-lg bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-300">
+                          در انتظار همگام‌سازی؛ ثبت نهایی نشده
                         </span>
                       ) : (
                         <span className="rounded-lg bg-red-500/10 px-2.5 py-1.5 text-xs text-red-400">

@@ -2,7 +2,11 @@
 
 import { Download, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { getActiveOfflineWorkspace } from "@/lib/offline-storage";
+import {
+  getActiveOfflineWorkspace,
+  getOfflineOutboxOperations,
+  isOfflineWorkspaceUnlocked,
+} from "@/lib/offline-storage";
 
 type InstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -44,6 +48,11 @@ export default function PwaControls() {
   const [snapshotStatus, setSnapshotStatus] = useState<
     "pending" | "complete" | "error" | "unavailable" | null
   >(null);
+  const [outboxStatus, setOutboxStatus] = useState<{
+    pending: number;
+    errors: number;
+    lastError: string | null;
+  } | null>(null);
   const [registration, setRegistration] =
     useState<ServiceWorkerRegistration | null>(null);
   const [updateReady, setUpdateReady] = useState(false);
@@ -65,6 +74,25 @@ export default function PwaControls() {
           setSnapshotStatus(
             workspace ? workspace.snapshotStatus ?? "unavailable" : null
           );
+          if (!workspace || !isOfflineWorkspaceUnlocked(workspace.accountKey)) {
+            setOutboxStatus(null);
+            return;
+          }
+          return getOfflineOutboxOperations(workspace.accountKey).then((operations) => {
+            if (!active) return;
+            const failed = operations.filter((operation) => operation.status === "failed");
+            const errors = operations.filter((operation) => operation.lastError);
+            const latestError = errors.sort(
+              (left, right) => right.updatedAt.localeCompare(left.updatedAt),
+            )[0];
+            setOutboxStatus({
+              pending: operations.filter(
+                (operation) => operation.status === "pending" || operation.status === "syncing",
+              ).length,
+              errors: Math.max(failed.length, errors.length),
+              lastError: latestError?.lastError ?? null,
+            });
+          });
         })
         .catch((error: unknown) => {
           console.error("Offline snapshot status could not be loaded:", error);
@@ -77,6 +105,10 @@ export default function PwaControls() {
     window.addEventListener("hirad-offline-storage-ready", handleStorageReady);
     window.addEventListener("hirad-offline-snapshot-updated", refreshSnapshotStatus);
     window.addEventListener("hirad-offline-storage-ready", refreshSnapshotStatus);
+    window.addEventListener("hirad-offline-workspace-unlocked", refreshSnapshotStatus);
+    window.addEventListener("hirad-offline-workspace-locked", refreshSnapshotStatus);
+    window.addEventListener("hirad-offline-outbox-updated", refreshSnapshotStatus);
+    window.addEventListener("hirad-offline-sync-succeeded", refreshSnapshotStatus);
     refreshSnapshotStatus();
 
     if (process.env.NODE_ENV === "production" && "serviceWorker" in navigator) {
@@ -123,6 +155,10 @@ export default function PwaControls() {
       window.removeEventListener("hirad-offline-storage-ready", handleStorageReady);
       window.removeEventListener("hirad-offline-snapshot-updated", refreshSnapshotStatus);
       window.removeEventListener("hirad-offline-storage-ready", refreshSnapshotStatus);
+      window.removeEventListener("hirad-offline-workspace-unlocked", refreshSnapshotStatus);
+      window.removeEventListener("hirad-offline-workspace-locked", refreshSnapshotStatus);
+      window.removeEventListener("hirad-offline-outbox-updated", refreshSnapshotStatus);
+      window.removeEventListener("hirad-offline-sync-succeeded", refreshSnapshotStatus);
     };
   }, []);
 
@@ -169,6 +205,16 @@ export default function PwaControls() {
                 : snapshotStatus === "error"
                   ? "دریافت ناموفق"
                   : "آماده‌سازی نشده"}
+          </span>
+        )}
+        {outboxStatus && (
+          <span role="status" className="hidden text-slate-400 sm:inline">
+            در انتظار همگام‌سازی: {outboxStatus.pending}
+            {outboxStatus.errors > 0 && (
+              <span className="mr-2 text-amber-400" title={outboxStatus.lastError ?? undefined}>
+                خطا: {outboxStatus.errors}
+              </span>
+            )}
           </span>
         )}
         {storageError && (

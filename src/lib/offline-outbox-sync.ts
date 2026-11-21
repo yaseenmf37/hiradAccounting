@@ -7,8 +7,13 @@ import {
   updateOfflineOutboxOperation,
 } from "@/lib/offline-storage";
 
+type SyncEntity = { id?: unknown; invoiceNumber?: unknown };
+
 type SyncResponse = {
-  invoice?: { id?: unknown; invoiceNumber?: unknown };
+  invoice?: SyncEntity;
+  contact?: SyncEntity;
+  expense?: SyncEntity;
+  payment?: SyncEntity;
   [key: string]: unknown;
 };
 
@@ -42,6 +47,14 @@ async function performSync(account: string) {
       .filter((operation) => operation.status === "synced")
       .map((operation) => operation.operationId)
   );
+  const operationsById = new Map(
+    operations.map((operation) => [operation.operationId, operation]),
+  );
+  const serverIdsByOperation = new Map(
+    operations
+      .filter((operation) => operation.status === "synced" && operation.serverId)
+      .map((operation) => [operation.operationId, operation.serverId!]),
+  );
   for (const operation of operations) {
     if (!navigator.onLine || !isOfflineWorkspaceUnlocked(account)) return;
     if (
@@ -49,6 +62,15 @@ async function performSync(account: string) {
         (dependencyId) => !completedThisPass.has(dependencyId)
       )
     ) {
+      const missingOrFailedDependency = operation.dependsOnOperationIds
+        .map((dependencyId) => operationsById.get(dependencyId))
+        .find((dependency) => !dependency || dependency.status === "failed");
+      if (missingOrFailedDependency) {
+        await updateOfflineOutboxOperation(operation.operationId, account, {
+          status: "failed",
+          lastError: "عملیات وابسته همگام‌سازی نشده است؛ ارتباط اسناد حفظ شد و این عملیات ارسال نشد.",
+        });
+      }
       continue;
     }
     const now = new Date();
@@ -58,7 +80,12 @@ async function performSync(account: string) {
     if (!(await claimOfflineOutboxOperation(operation.operationId, account, now))) {
       continue;
     }
-    if (!isOfflineWorkspaceUnlocked(account)) return;
+    if (!isOfflineWorkspaceUnlocked(account)) {
+      await updateOfflineOutboxOperation(operation.operationId, account, {
+        status: "pending",
+      });
+      return;
+    }
 
     const request = operation.payload as {
       path?: unknown;
@@ -79,13 +106,38 @@ async function performSync(account: string) {
     }
 
     try {
+      const body =
+        request.body && typeof request.body === "object" && !Array.isArray(request.body)
+          ? { ...(request.body as Record<string, unknown>) }
+          : request.body;
+      if (body && typeof body === "object" && !Array.isArray(body)) {
+        const bodyRecord = body as Record<string, unknown>;
+        for (const dependencyId of operation.dependsOnOperationIds ?? []) {
+          const dependency = operationsById.get(dependencyId);
+          const serverId = serverIdsByOperation.get(dependencyId);
+          if (
+            dependency?.entityType === "invoice" &&
+            bodyRecord.invoiceId === dependency.entityId &&
+            !serverId
+          ) {
+            throw new Error("شناسه رسمی فاکتور وابسته هنوز از سرور دریافت نشده است.");
+          }
+          if (
+            dependency?.entityType === "invoice" &&
+            serverId &&
+            bodyRecord.invoiceId === dependency.entityId
+          ) {
+            bodyRecord.invoiceId = serverId;
+          }
+        }
+      }
       const response = await fetch(request.path, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Idempotency-Key": operation.idempotencyKey,
         },
-        body: JSON.stringify(request.body),
+        body: JSON.stringify(body),
         cache: "no-store",
       });
       const data = (await response.json().catch(() => null)) as SyncResponse | null;
@@ -105,10 +157,21 @@ async function performSync(account: string) {
         continue;
       }
 
-      const invoice = data?.invoice;
+      const entityResponseKey = {
+        invoice: "invoice",
+        contact: "contact",
+        expense: "expense",
+        payment: "payment",
+      }[operation.entityType];
+      const syncedEntity = entityResponseKey
+        ? data?.[entityResponseKey] as SyncEntity | undefined
+        : undefined;
       if (
-        operation.entityType === "invoice" &&
-        (!invoice || typeof invoice.id !== "string" || typeof invoice.invoiceNumber !== "string")
+        entityResponseKey &&
+        (!syncedEntity ||
+          typeof syncedEntity.id !== "string" ||
+          (operation.entityType === "invoice" &&
+            typeof syncedEntity.invoiceNumber !== "string"))
       ) {
         await scheduleRetry(operation, account, "پاسخ موفق سرور ناقص است؛ عملیات با همان کلید دوباره بررسی می‌شود.");
         continue;
@@ -116,11 +179,16 @@ async function performSync(account: string) {
       await updateOfflineOutboxOperation(operation.operationId, account, {
         status: "synced",
         lastError: null,
-        serverId: typeof invoice?.id === "string" ? invoice.id : null,
+        serverId: typeof syncedEntity?.id === "string" ? syncedEntity.id : null,
         serverNumber:
-          typeof invoice?.invoiceNumber === "string" ? invoice.invoiceNumber : null,
+          typeof syncedEntity?.invoiceNumber === "string"
+            ? syncedEntity.invoiceNumber
+            : null,
       });
       completedThisPass.add(operation.operationId);
+      if (typeof syncedEntity?.id === "string") {
+        serverIdsByOperation.set(operation.operationId, syncedEntity.id);
+      }
       syncedAny = true;
     } catch (error) {
       const message =

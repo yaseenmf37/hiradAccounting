@@ -57,6 +57,8 @@ export async function getCurrentUser() {
           id: true,
           username: true,
           fullName: true,
+          phone: true,
+          phone2: true,
           role: true,
           isActive: true,
           mustChangePassword: true,

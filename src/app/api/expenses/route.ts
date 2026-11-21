@@ -15,6 +15,7 @@ import {
 } from "@/lib/cursor-pagination";
 
 const createExpenseSchema = z.object({
+  id: z.string().uuid().optional(),
   title: z.string().trim().min(2).max(150),
   category: z.nativeEnum(ExpenseCategory),
   amount: z.number().int().positive().safe(),
@@ -237,6 +238,17 @@ export async function POST(request: Request) {
 
     const data = parsed.data;
     const business = user.business;
+    const idempotencyKey = request.headers.get("Idempotency-Key")?.trim();
+    if (
+      (idempotencyKey && (idempotencyKey.length < 16 || idempotencyKey.length > 128)) ||
+      (idempotencyKey && data.id !== idempotencyKey) ||
+      (data.id && !idempotencyKey)
+    ) {
+      return NextResponse.json(
+        { error: "کلید تکرارناپذیری عملیات هزینه معتبر نیست." },
+        { status: 400 },
+      );
+    }
 
     const amount = toRial(BigInt(data.amount), business.currencyUnit);
 
@@ -251,17 +263,72 @@ export async function POST(request: Request) {
       );
     }
 
-    const expense = await prisma.expense.create({
-      data: {
-        businessId: business.id,
-        title: data.title,
-        category: data.category,
-        amount,
-        method: data.method,
-        description: data.description || null,
-        spentAt,
-      },
-    });
+    const expenseData = {
+      businessId: business.id,
+      title: data.title,
+      category: data.category,
+      amount,
+      method: data.method,
+      description: data.description || null,
+      spentAt,
+    };
+    const matchesRequest = (existing: {
+      title: string;
+      category: ExpenseCategory;
+      amount: bigint;
+      method: PaymentMethod;
+      description: string | null;
+      spentAt: Date;
+    }) =>
+      existing.title === expenseData.title &&
+      existing.category === expenseData.category &&
+      existing.amount === expenseData.amount &&
+      existing.method === expenseData.method &&
+      existing.description === expenseData.description &&
+      existing.spentAt.getTime() === expenseData.spentAt.getTime();
+
+    if (data.id) {
+      const existing = await prisma.expense.findFirst({
+        where: { id: data.id, businessId: business.id },
+      });
+      if (existing) {
+        if (!matchesRequest(existing)) {
+          return NextResponse.json(
+            { error: "کلید عملیات هزینه قبلاً با اطلاعات دیگری استفاده شده است." },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json({ expense: serializeExpense(existing) });
+      }
+    }
+
+    let expense;
+    try {
+      expense = await prisma.expense.create({
+        data: {
+          ...expenseData,
+          ...(data.id ? { id: data.id } : {}),
+        },
+      });
+    } catch (error) {
+      if (
+        data.id &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        const existing = await prisma.expense.findFirst({
+          where: { id: data.id, businessId: business.id },
+        });
+        if (existing && matchesRequest(existing)) {
+          return NextResponse.json({ expense: serializeExpense(existing) });
+        }
+        return NextResponse.json(
+          { error: "کلید عملیات هزینه قبلاً استفاده شده است." },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
 
     return NextResponse.json(
       { expense: serializeExpense(expense) },

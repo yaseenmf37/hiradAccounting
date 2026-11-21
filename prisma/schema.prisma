@@ -14,6 +14,8 @@ model User {
   username           String    @unique
   passwordHash       String
   fullName           String
+  phone              String?
+  phone2             String?
   role               UserRole  @default(BUSINESS_OWNER)
   isActive           Boolean   @default(true)
   mustChangePassword Boolean   @default(true)

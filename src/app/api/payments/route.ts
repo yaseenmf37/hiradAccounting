@@ -16,6 +16,7 @@ import {
 } from "@/lib/cursor-pagination";
 
 const paymentSchema = z.object({
+  id: z.string().uuid().optional(),
   contactId: z.string().optional().nullable(),
   invoiceId: z.string().optional().nullable(),
   type: z.nativeEnum(PaymentType),
@@ -252,6 +253,17 @@ export async function POST(request: NextRequest) {
     }
 
     const data = parsed.data;
+    const idempotencyKey = request.headers.get("Idempotency-Key")?.trim();
+    if (
+      (idempotencyKey && (idempotencyKey.length < 16 || idempotencyKey.length > 128)) ||
+      (idempotencyKey && data.id !== idempotencyKey) ||
+      (data.id && !idempotencyKey)
+    ) {
+      return NextResponse.json(
+        { error: "کلید تکرارناپذیری عملیات پرداخت معتبر نیست." },
+        { status: 400 },
+      );
+    }
     if (data.method === PaymentMethod.LEDGER) {
       return NextResponse.json(
         { error: "ثبت حساب دفتری فقط از طریق برنامه پرداخت فاکتور امکان‌پذیر است." },
@@ -297,7 +309,106 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const expectedPayment = {
+      contactId: data.contactId || null,
+      invoiceId: data.invoiceId || null,
+      type: data.type,
+      method: data.method,
+      amount,
+      trackingNumber: data.trackingNumber || null,
+      checkNumber: data.method === PaymentMethod.CHECK
+        ? data.checkNumber || data.trackingNumber || null
+        : null,
+      checkIssuedAt: data.method === PaymentMethod.CHECK && data.checkIssuedAt
+        ? new Date(`${data.checkIssuedAt}T00:00:00.000Z`).getTime()
+        : null,
+      checkDueAt: data.method === PaymentMethod.CHECK && data.checkDueAt
+        ? new Date(`${data.checkDueAt}T00:00:00.000Z`).getTime()
+        : null,
+      checkClearedAt: data.method === PaymentMethod.CHECK && data.checkClearedAt
+        ? new Date(`${data.checkClearedAt}T00:00:00.000Z`).getTime()
+        : null,
+      payableTo: data.method === PaymentMethod.CHECK ? data.payableTo || null : null,
+      destinationDetails:
+        data.method === PaymentMethod.CARD_TO_CARD || data.method === PaymentMethod.POS
+          ? data.destinationDetails || null
+          : null,
+      description: data.description || null,
+      paidAt: data.paidAt ? new Date(data.paidAt).getTime() : null,
+    };
+    const matchesRequest = (existing: {
+      contactId: string | null;
+      invoiceId: string | null;
+      type: PaymentType;
+      method: PaymentMethod;
+      amount: bigint;
+      trackingNumber: string | null;
+      checkNumber: string | null;
+      checkIssuedAt: Date | null;
+      checkDueAt: Date | null;
+      checkClearedAt: Date | null;
+      payableTo: string | null;
+      destinationDetails: string | null;
+      description: string | null;
+      paidAt: Date;
+    }, expectedContactId = expectedPayment.contactId) =>
+      existing.contactId === expectedContactId &&
+      existing.invoiceId === expectedPayment.invoiceId &&
+      existing.type === expectedPayment.type &&
+      existing.method === expectedPayment.method &&
+      existing.amount === expectedPayment.amount &&
+      existing.trackingNumber === expectedPayment.trackingNumber &&
+      existing.checkNumber === expectedPayment.checkNumber &&
+      (existing.checkIssuedAt?.getTime() ?? null) === expectedPayment.checkIssuedAt &&
+      (existing.checkDueAt?.getTime() ?? null) === expectedPayment.checkDueAt &&
+      (existing.checkClearedAt?.getTime() ?? null) === expectedPayment.checkClearedAt &&
+      existing.payableTo === expectedPayment.payableTo &&
+      existing.destinationDetails === expectedPayment.destinationDetails &&
+      existing.description === expectedPayment.description &&
+      (expectedPayment.paidAt === null ||
+        existing.paidAt.getTime() === expectedPayment.paidAt);
+    const paymentInclude = {
+      contact: { select: { id: true, name: true } },
+      invoice: {
+        select: {
+          id: true,
+          invoiceNumber: true,
+          type: true,
+          status: true,
+          total: true,
+        },
+      },
+    } as const;
+    const findExistingPayment = () =>
+      data.id
+        ? prisma.payment.findFirst({
+            where: { id: data.id, businessId },
+            include: paymentInclude,
+          })
+        : Promise.resolve(null);
+
+    try {
     const payment = await prisma.$transaction(async (tx) => {
+      if (data.id) {
+        const relatedInvoice = data.invoiceId
+          ? await tx.invoice.findFirst({
+              where: { id: data.invoiceId, businessId },
+              select: { contactId: true },
+            })
+          : null;
+        const expectedContactId = data.contactId || relatedInvoice?.contactId || null;
+        const existing = await tx.payment.findFirst({
+          where: { id: data.id, businessId },
+          include: paymentInclude,
+        });
+        if (existing) {
+          if (!matchesRequest(existing, expectedContactId)) {
+            throw new Error("IDEMPOTENCY_CONFLICT");
+          }
+          return existing;
+        }
+      }
+
       let contactId = data.contactId || null;
 
       if (data.invoiceId) {
@@ -369,6 +480,7 @@ export async function POST(request: NextRequest) {
 
       return tx.payment.create({
         data: {
+          ...(data.id ? { id: data.id } : {}),
           businessId,
           contactId,
           invoiceId: data.invoiceId || null,
@@ -396,18 +508,7 @@ export async function POST(request: NextRequest) {
           description: data.description || null,
           paidAt: data.paidAt ? new Date(data.paidAt) : new Date(),
         },
-        include: {
-          contact: { select: { id: true, name: true } },
-          invoice: {
-            select: {
-              id: true,
-              invoiceNumber: true,
-              type: true,
-              status: true,
-              total: true,
-            },
-          },
-        },
+        include: paymentInclude,
       });
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 
@@ -415,6 +516,36 @@ export async function POST(request: NextRequest) {
       { payment: serializePayment(payment) },
       { status: 201 },
     );
+    } catch (error) {
+      if (error instanceof Error && error.message === "IDEMPOTENCY_CONFLICT") {
+        return NextResponse.json(
+          { error: "کلید عملیات پرداخت قبلاً با اطلاعات دیگری استفاده شده است." },
+          { status: 409 },
+        );
+      }
+      if (
+        data.id &&
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        const existing = await findExistingPayment();
+        const relatedInvoice = data.invoiceId
+          ? await prisma.invoice.findFirst({
+              where: { id: data.invoiceId, businessId },
+              select: { contactId: true },
+            })
+          : null;
+        const expectedContactId = data.contactId || relatedInvoice?.contactId || null;
+        if (existing && matchesRequest(existing, expectedContactId)) {
+          return NextResponse.json({ payment: serializePayment(existing) });
+        }
+        return NextResponse.json(
+          { error: "کلید عملیات پرداخت قبلاً استفاده شده است." },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
   } catch (error) {
     if (error instanceof Error) {
       const messages: Record<string, string> = {

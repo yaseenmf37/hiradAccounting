@@ -77,12 +77,11 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET" || url.origin !== self.location.origin) return;
 
   if (request.mode === "navigate") {
-    if (url.pathname !== "/" && url.pathname !== OFFLINE_WORKSPACE) return;
     event.respondWith(
       fetch(request, { cache: "no-store" }).catch(async () => {
         const offlineCache = await caches.open(OFFLINE_CACHE);
         const offlineWorkspace = await offlineCache.match(OFFLINE_WORKSPACE);
-        if (offlineWorkspace && url.pathname === "/") {
+        if (offlineWorkspace && url.pathname !== OFFLINE_WORKSPACE) {
           return Response.redirect(
             new URL(OFFLINE_WORKSPACE, self.location.origin),
             302

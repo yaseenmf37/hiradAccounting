@@ -999,16 +999,35 @@ export function configureOfflineWorkspace(workspace: Omit<OfflineWorkspace, "acc
       response = await networkFetch(input, init);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw error;
-      const cached = await findResponse(account, url.pathname + url.search);
-      if (!cached) throw error;
+      try {
+        const cached = isOfflineWorkspaceUnlocked(account)
+          ? await findResponse(account, url.pathname + url.search)
+          : null;
+        if (cached) {
+          return new Response(JSON.stringify(cached.payload), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "X-Hirad-Offline-Cache": "true",
+            },
+          });
+        }
+      } catch (cacheError) {
+        reportOfflineStorageError(cacheError, {
+          accountKey: account,
+          operation: "read-api-cache",
+          url: url.pathname + url.search,
+        });
+        return Response.json(
+          { message: "خواندن پاسخ ذخیره‌شده آفلاین ناموفق بود." },
+          { status: 503, headers: { "X-Hirad-Offline-Cache": "miss" } },
+        );
+      }
 
-      return new Response(JSON.stringify(cached.payload), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "X-Hirad-Offline-Cache": "true",
-        },
-      });
+      return Response.json(
+        { message: "این اطلاعات در حافظه آفلاین موجود نیست؛ پس از اتصال دوباره تلاش کنید." },
+        { status: 503, headers: { "X-Hirad-Offline-Cache": "miss" } },
+      );
     }
 
     if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) {
@@ -1127,6 +1146,8 @@ export async function bootstrapOfflineWorkspace(account: string) {
 
 async function performWorkspaceBootstrap(account: string) {
   if (!isOfflineWorkspaceUnlocked(account)) return;
+  const invoiceIds = new Set<string>();
+  const contactIds = new Set<string>();
   const datasets: {
     path: string;
     params: Record<string, string>;
@@ -1199,6 +1220,20 @@ async function performWorkspaceBootstrap(account: string) {
         ) {
           throw new Error(`Incomplete offline bootstrap response from ${dataset.path}`);
         }
+        const records = (result as Record<string, unknown>)[dataset.collection] as unknown[];
+        if (dataset.collection === "invoices" || dataset.collection === "contacts") {
+          const ids = dataset.collection === "invoices" ? invoiceIds : contactIds;
+          for (const record of records) {
+            if (
+              record &&
+              typeof record === "object" &&
+              !Array.isArray(record) &&
+              typeof (record as { id?: unknown }).id === "string"
+            ) {
+              ids.add((record as { id: string }).id);
+            }
+          }
+        }
         const nextCursor = (result as { nextCursor?: unknown }).nextCursor;
         if (nextCursor !== null && nextCursor !== undefined && typeof nextCursor !== "string") {
           throw new Error(`Invalid pagination cursor from ${dataset.path}`);
@@ -1209,6 +1244,82 @@ async function performWorkspaceBootstrap(account: string) {
           throw new Error(`Offline bootstrap page limit reached for ${dataset.path}`);
         }
       } while (cursor);
+    }
+
+    for (const invoiceId of invoiceIds) {
+      if (!isOfflineWorkspaceUnlocked(account)) return;
+      const requestUrl = `/api/invoices/${encodeURIComponent(invoiceId)}`;
+      const response = await fetch(requestUrl, { cache: "no-store" });
+      if (!isOfflineWorkspaceUnlocked(account)) return;
+      assertResponseWasSaved(response, requestUrl);
+      if (!response.ok) {
+        throw new Error(`Offline bootstrap failed for ${requestUrl}: ${response.status}`);
+      }
+      const result: unknown = await response.json();
+      const invoice =
+        result && typeof result === "object" && !Array.isArray(result)
+          ? (result as Record<string, unknown>).invoice
+          : null;
+      if (
+        !invoice ||
+        typeof invoice !== "object" ||
+        Array.isArray(invoice) ||
+        typeof (invoice as Record<string, unknown>).id !== "string"
+      ) {
+        throw new Error(`Invalid offline bootstrap response from ${requestUrl}`);
+      }
+    }
+
+    const fetchContactPages = async (
+      contactId: string,
+      endpoint: "ledger" | "invoices",
+      collection: "entries" | "invoices",
+      baseParams: Record<string, string>,
+    ) => {
+      let cursor: string | null = null;
+      let pages = 0;
+      do {
+        const params = new URLSearchParams(baseParams);
+        if (cursor) params.set("cursor", cursor);
+        const requestUrl =
+          `/api/contacts/${encodeURIComponent(contactId)}/${endpoint}?${params}`;
+        const response = await fetch(requestUrl, { cache: "no-store" });
+        if (!isOfflineWorkspaceUnlocked(account)) return;
+        assertResponseWasSaved(response, requestUrl);
+        if (!response.ok) {
+          throw new Error(`Offline bootstrap failed for ${requestUrl}: ${response.status}`);
+        }
+        const result: unknown = await response.json();
+        if (
+          !result ||
+          typeof result !== "object" ||
+          Array.isArray(result) ||
+          !Array.isArray((result as Record<string, unknown>)[collection]) ||
+          !Object.hasOwn(result, "nextCursor")
+        ) {
+          throw new Error(`Incomplete offline bootstrap response from ${requestUrl}`);
+        }
+        const nextCursor = (result as { nextCursor?: unknown }).nextCursor;
+        if (nextCursor !== null && nextCursor !== undefined && typeof nextCursor !== "string") {
+          throw new Error(`Invalid pagination cursor from ${requestUrl}`);
+        }
+        cursor = typeof nextCursor === "string" ? nextCursor : null;
+        pages += 1;
+        if (pages >= 1000 && cursor) {
+          throw new Error(`Offline bootstrap page limit reached for ${requestUrl}`);
+        }
+      } while (cursor);
+    };
+
+    for (const contactId of contactIds) {
+      if (!isOfflineWorkspaceUnlocked(account)) return;
+      await fetchContactPages(contactId, "ledger", "entries", { limit: "50" });
+      await fetchContactPages(
+        contactId,
+        "invoices",
+        "invoices",
+        { limit: "50", settlement: "all" },
+      );
     }
 
     const dashboardResponse = await fetch("/api/dashboard", { cache: "no-store" });
@@ -1346,6 +1457,18 @@ export async function getOfflineOutboxOperations(account: string) {
   );
 }
 
+export async function getOfflineDependencyOperationIds(
+  account: string,
+  entityIds: Array<string | null | undefined>,
+) {
+  const wantedIds = new Set(entityIds.filter((id): id is string => Boolean(id)));
+  if (!wantedIds.size) return [];
+  const operations = await getOfflineOutboxOperations(account);
+  return operations
+    .filter((operation) => wantedIds.has(operation.entityId))
+    .map((operation) => operation.operationId);
+}
+
 export async function updateOfflineOutboxOperation(
   operationId: string,
   account: string,
@@ -1424,10 +1547,17 @@ export async function removeOfflineOutboxOperation(
   const database = await openDatabase();
   const transaction = database.transaction(OUTBOX_STORE, "readwrite");
   const store = transaction.objectStore(OUTBOX_STORE);
-  const request = store.get(operationId);
+  const request = store.index("accountKey").getAll(account);
   request.onsuccess = () => {
-    const operation = request.result as OfflineOutboxOperation | undefined;
-    if (operation?.accountKey === account) store.delete(operationId);
+    const operations = request.result as OfflineOutboxOperation[];
+    const operation = operations.find((entry) => entry.operationId === operationId);
+    if (!operation) return;
+    const hasPendingDependents = operations.some(
+      (entry) =>
+        entry.status !== "synced" &&
+        entry.dependsOnOperationIds?.includes(operationId),
+    );
+    if (!hasPendingDependents) store.delete(operationId);
   };
   await new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
