@@ -759,59 +759,21 @@ export async function PATCH(
       };
 
       if (editingIssuedPurchase) {
-        if (
-          existing.backorders.length > 0 ||
-          existing.purchaseReturns.length > 0 ||
-          !existing.issuedAt
-        ) {
+        if (!existing.issuedAt) {
           throw new Error("PURCHASE_HISTORY_UNSAFE");
-        }
-        const sourceMovementIds = existing.movements
-          .filter((movement) => movement.type === "PURCHASE")
-          .map((movement) => movement.id);
-        if (sourceMovementIds.length > 0) {
-          const allocatedBackorders = await tx.backorderAllocation.count({
-            where: { inventoryMovementId: { in: sourceMovementIds } },
-          });
-          if (allocatedBackorders > 0) throw new Error("PURCHASE_HISTORY_UNSAFE");
         }
 
         const beforeByProduct = new Map<string, Prisma.Decimal>();
         const beforeCostByProduct = new Map<string, bigint>();
-        const invoiceQuantities = new Map<string, Prisma.Decimal>();
         for (const item of existing.items) {
-          invoiceQuantities.set(
-            item.productId,
-            (invoiceQuantities.get(item.productId) ?? new Prisma.Decimal(0)).add(item.quantity),
-          );
-        }
-        for (const movement of existing.movements) {
-          if (movement.type !== "PURCHASE" && movement.type !== "RETURN_OUT") continue;
-          const sign = movement.type === "PURCHASE" ? 1 : -1;
           beforeByProduct.set(
-            movement.productId,
-            (beforeByProduct.get(movement.productId) ?? new Prisma.Decimal(0))
-              .add(movement.quantity.mul(sign)),
+            item.productId,
+            (beforeByProduct.get(item.productId) ?? new Prisma.Decimal(0)).add(item.quantity),
           );
           beforeCostByProduct.set(
-            movement.productId,
-            (beforeCostByProduct.get(movement.productId) ?? 0n) +
-              (sign === 1 ? movement.totalCost : -movement.totalCost),
+            item.productId,
+            (beforeCostByProduct.get(item.productId) ?? 0n) + item.costOfGoodsSold,
           );
-        }
-        for (const productId of new Set([
-          ...invoiceQuantities.keys(),
-          ...beforeByProduct.keys(),
-        ])) {
-          const invoiceQuantity =
-            invoiceQuantities.get(productId) ?? new Prisma.Decimal(0);
-          if (
-            !invoiceQuantity.equals(
-              beforeByProduct.get(productId) ?? new Prisma.Decimal(0),
-            )
-          ) {
-            throw new Error("PURCHASE_HISTORY_UNSAFE");
-          }
         }
 
         const allocation = calculatePurchaseItemCosts(items, extraCosts, discount);
