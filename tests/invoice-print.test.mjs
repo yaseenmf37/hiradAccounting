@@ -121,6 +121,11 @@ function assertInvoiceMarkup(scenario, markup) {
     "print header must contain three columns",
   );
   assert.match(markup, new RegExp(scenario.expectedTitle));
+  assert.match(
+    markup,
+    /class="print-invoice-header-column print-invoice-brand"><strong>فروشگاه آزمایشی<\/strong>/,
+    "store name must be centered in the print header",
+  );
   assert.match(markup, /شماره تماس فروشنده/);
   assert.match(markup, new RegExp(`نام فروشنده: ${scenario.expectedSeller}`));
   assert.match(markup, new RegExp(`نام مشتری: ${scenario.expectedCustomer}`));

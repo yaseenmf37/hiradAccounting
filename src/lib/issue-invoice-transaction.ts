@@ -1,5 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { MAX_CURRENCY_RIAL } from "@/lib/currency";
+import {
+  allocateInvoiceAmount,
+  calculatePurchaseItemCosts,
+} from "@/lib/invoice-financials";
 import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 
 type InvoiceItemData = {
@@ -9,19 +13,6 @@ type InvoiceItemData = {
   unitPrice: bigint;
   total: bigint;
 };
-
-function allocateAmount(amount: bigint, weights: bigint[]) {
-  if (weights.length === 0) return [];
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
-  if (totalWeight <= 0n) throw new Error("INVALID_ALLOCATION");
-  const allocations = weights.map((weight) => (amount * weight) / totalWeight);
-  let remainder = amount - allocations.reduce((sum, value) => sum + value, 0n);
-  for (let index = 0; remainder > 0n; index = (index + 1) % allocations.length) {
-    allocations[index] += 1n;
-    remainder -= 1n;
-  }
-  return allocations;
-}
 
 export async function issueInvoiceInTransaction(
   tx: Prisma.TransactionClient,
@@ -91,12 +82,11 @@ export async function issueInvoiceInTransaction(
 
   const purchaseCosts = new Map<string, bigint>();
   if (invoice.type === "PURCHASE") {
-    const subtotal = items.reduce((sum, item) => sum + item.total, 0n);
-    if (subtotal <= 0n) throw new Error("INVALID_PURCHASE_TOTAL");
-    if (invoice.discount > subtotal) throw new Error("INVALID_PURCHASE_DISCOUNT");
-    const acquisitionTotal = subtotal + invoice.extraCosts - invoice.discount;
-    if (acquisitionTotal < 0n) throw new Error("INVALID_ACQUISITION_COST");
-    const allocations = allocateAmount(acquisitionTotal, items.map((item) => item.total));
+    const allocations = calculatePurchaseItemCosts(
+      items,
+      invoice.extraCosts,
+      invoice.discount,
+    );
     items.forEach((item, index) => purchaseCosts.set(item.id, allocations[index]));
   }
 
@@ -157,7 +147,7 @@ export async function issueInvoiceInTransaction(
       const itemCosts =
         totalCost === 0n
           ? group.items.map(() => 0n)
-          : allocateAmount(totalCost, costWeights);
+          : allocateInvoiceAmount(totalCost, costWeights);
 
       for (let index = 0; index < group.items.length; index++) {
         await tx.invoiceItem.update({

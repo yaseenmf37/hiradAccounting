@@ -11,9 +11,9 @@ type RouteContext = {
   params: Promise<{ invoiceId: string }>;
 };
 
-export async function POST(
-  _request: NextRequest,
-  context: RouteContext
+async function handleInvoiceAction(
+  context: RouteContext,
+  action: "cancel" | "delete",
 ) {
   try {
     const user = await getCurrentUser();
@@ -46,12 +46,16 @@ export async function POST(
             items: true,
             purchaseReturns: { select: { id: true } },
             payments: {
-              where: {
-                status: PaymentStatus.CONFIRMED,
-              },
+              where: action === "delete"
+                ? { status: { in: [PaymentStatus.CONFIRMED, PaymentStatus.PENDING] } }
+                : { status: PaymentStatus.CONFIRMED },
               select: {
                 id: true,
                 amount: true,
+                method: true,
+                status: true,
+                allocationBatchId: true,
+                description: true,
               },
             },
           },
@@ -64,7 +68,7 @@ export async function POST(
         if (invoice.items.length === 0) {
           throw new Error("INVOICE_EMPTY");
         }
-        if (invoice.payments.length > 0) {
+        if (action === "cancel" && invoice.payments.length > 0) {
           throw new Error("INVOICE_HAS_PAYMENTS");
         }
         if (!invoice.issuedAt) {
@@ -151,6 +155,25 @@ export async function POST(
 
           if (laterMovement) {
             throw new Error("PURCHASE_HAS_LATER_MOVEMENTS");
+          }
+          const purchaseMovements = await tx.inventoryMovement.findMany({
+            where: {
+              businessId,
+              invoiceId: invoice.id,
+              type: "PURCHASE",
+            },
+            select: { id: true },
+          });
+          if (purchaseMovements.length === 0) {
+            throw new Error("ORIGINAL_MOVEMENT_NOT_FOUND");
+          }
+          const allocatedBackorders = await tx.backorderAllocation.count({
+            where: {
+              inventoryMovementId: { in: purchaseMovements.map((movement) => movement.id) },
+            },
+          });
+          if (allocatedBackorders > 0) {
+            throw new Error("PURCHASE_HAS_DEPENDENT_COSTING");
           }
         }
 
@@ -306,6 +329,46 @@ export async function POST(
           }
         }
 
+        if (action === "delete") {
+          const cancelledAt = new Date();
+          for (const payment of invoice.payments) {
+            if (payment.status === PaymentStatus.PENDING || payment.method === "LEDGER") {
+              const cancelledPayment = await tx.payment.updateMany({
+                where: {
+                  id: payment.id,
+                  businessId,
+                  invoiceId: invoice.id,
+                  status: payment.status,
+                },
+                data: {
+                  status: PaymentStatus.CANCELLED,
+                  cancelledAt,
+                  cancelReason: `تخصیص مالی فاکتور ${invoice.invoiceNumber} حذف شد.`,
+                },
+              });
+              if (cancelledPayment.count !== 1) throw new Error("PAYMENT_PLAN_CONFLICT");
+            } else {
+              const note = `تخصیص از فاکتور حذف‌شده ${invoice.invoiceNumber}`;
+              const detachedPayment = await tx.payment.updateMany({
+                where: {
+                  id: payment.id,
+                  businessId,
+                  invoiceId: invoice.id,
+                  status: PaymentStatus.CONFIRMED,
+                },
+                data: {
+                  invoiceId: null,
+                  allocationBatchId: null,
+                  description: payment.description
+                    ? `${payment.description}؛ ${note}`
+                    : note,
+                },
+              });
+              if (detachedPayment.count !== 1) throw new Error("PAYMENT_PLAN_CONFLICT");
+            }
+          }
+        }
+
         const cancelled = await tx.invoice.updateMany({
           where: {
             id: invoice.id,
@@ -344,7 +407,9 @@ export async function POST(
     );
 
     return NextResponse.json({
-      message: "فاکتور با موفقیت لغو شد.",
+      message: action === "delete"
+        ? "فاکتور از سوابق فعال حذف شد و آثار انبار و حسابداری آن اصلاح شد."
+        : "فاکتور با موفقیت لغو شد.",
       invoice: result
         ? {
             ...result,
@@ -392,6 +457,11 @@ export async function POST(
             "پس از این خرید برای یکی از کالاها گردش دیگری ثبت شده است؛ لغو خرید برای حفظ دقت بهای تمام‌شده امکان‌پذیر نیست.",
           status: 409,
         },
+        PURCHASE_HAS_DEPENDENT_COSTING: {
+          message:
+            "این خرید برای نهایی‌کردن بهای تمام‌شده فروش‌های قبلی استفاده شده است و تا اصلاح آن سوابق، حذف خودکار امن نیست.",
+          status: 409,
+        },
         PURCHASE_HAS_RETURNS: {
           message: "فاکتور خرید دارای مرجوعی است؛ برای حفظ سوابق، ابتدا مرجوعی باید در مسیر اصلاحی جداگانه تعیین تکلیف شود.",
           status: 409,
@@ -414,6 +484,10 @@ export async function POST(
         },
         STOCK_CONFLICT: {
           message: "موجودی هم‌زمان تغییر کرده است. دوباره تلاش کنید.",
+          status: 409,
+        },
+        PAYMENT_PLAN_CONFLICT: {
+          message: "وضعیت پرداخت هم‌زمان تغییر کرده؛ دوباره تلاش کنید.",
           status: 409,
         },
       };
@@ -441,8 +515,16 @@ export async function POST(
     console.error("Cancel invoice error:", error);
 
     return NextResponse.json(
-      { message: "خطا در لغو فاکتور." },
+      { message: action === "delete" ? "خطا در حذف فاکتور." : "خطا در لغو فاکتور." },
       { status: 500 }
     );
   }
+}
+
+export async function POST(_request: NextRequest, context: RouteContext) {
+  return handleInvoiceAction(context, "cancel");
+}
+
+export async function DELETE(_request: NextRequest, context: RouteContext) {
+  return handleInvoiceAction(context, "delete");
 }

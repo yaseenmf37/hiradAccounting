@@ -36,6 +36,12 @@ import {
   countInvoiceItemRows,
   filterInvoiceProducts,
 } from "@/lib/invoice-presentation";
+import {
+  calculatePercentageDiscount,
+  calculateReturnedSaleRevenue,
+  calculateSaleNetProfit,
+  estimateSaleCost,
+} from "@/lib/invoice-financials";
 
 type CurrencyUnit = "RIAL" | "TOMAN";
 type InvoiceType = "PURCHASE" | "SALE";
@@ -57,6 +63,8 @@ type Product = {
   purchasePrice: string;
   salePrice: string;
   stock: string;
+  averageCost?: string;
+  inventoryValue?: string;
   categoryId: string | null;
   category?: { id: string; name: string } | null;
 };
@@ -226,15 +234,6 @@ const emptyItem = (): FormItem => ({
   quantity: "1",
   unitPrice: "0",
 });
-
-function percentageDiscountAmount(base: bigint, value: string) {
-  const normalized = normalizeDigits(value);
-  if (!/^\d{1,3}(\.\d{1,2})?$/.test(normalized)) return null;
-  const [whole, fraction = ""] = normalized.split(".");
-  const units = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
-  if (units > 10000n) return null;
-  return (base * units + 5000n) / 10000n;
-}
 
 function formatDiscountPercent(value: string) {
   return `${new Intl.NumberFormat("fa-IR", { maximumFractionDigits: 2 }).format(Number(value))}٪`;
@@ -1065,7 +1064,13 @@ export default function InvoicesClient({
   const discountBase = subtotal;
 
   const calculatedDiscount = discountMode === "PERCENT"
-    ? percentageDiscountAmount(discountBase, discountPercent)
+    ? (() => {
+        try {
+          return calculatePercentageDiscount(discountBase, normalizeDigits(discountPercent));
+        } catch {
+          return null;
+        }
+      })()
     : parseCurrencyAmount(discount, currencyUnit);
 
   const discountAmount = calculatedDiscount ?? 0n;
@@ -1086,6 +1091,28 @@ export default function InvoicesClient({
     ? finalTotal - actualPaymentTotal
     : 0n;
 
+  const previewCost = type === "SALE"
+    ? estimateSaleCost(
+        items.filter((item) =>
+          item.productId &&
+          /^\d+(\.\d{1,3})?$/.test(normalizeDigits(item.quantity)) &&
+          parseQuantityUnits(item.quantity) > 0n,
+        ),
+        products.map((product) => ({
+          id: product.id,
+          stock: product.stock,
+          averageCost: product.averageCost ?? "0",
+          inventoryValue: product.inventoryValue ?? "0",
+        })),
+      )
+    : { totalCost: 0n, fullyCosted: true };
+  const previewNetProfit = calculateSaleNetProfit(
+    subtotal,
+    parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n,
+    discountAmount,
+    previewCost.totalCost,
+  );
+
   const detailCostOfGoodsSold = detailInvoice?.items.reduce(
   (sum, item) => sum + BigInt(item.costOfGoodsSold ?? "0"),
   0n
@@ -1097,10 +1124,17 @@ export default function InvoicesClient({
         parseQuantityUnits(item.quantity),
     );
 
-const detailReturnedSales = detailInvoice?.salesReturns?.reduce(
-  (sum, salesReturn) => sum + BigInt(salesReturn.total),
-  0n,
-) ?? 0n;
+const detailReturnedSales = detailInvoice
+  ? detailInvoice.salesReturns?.reduce(
+      (sum, salesReturn) => sum + calculateReturnedSaleRevenue(
+        BigInt(salesReturn.total),
+        BigInt(detailInvoice.subtotal),
+        BigInt(detailInvoice.discount),
+        BigInt(detailInvoice.total),
+      ),
+      0n,
+    ) ?? 0n
+  : 0n;
 const detailReturnedCost = detailInvoice?.salesReturns?.reduce(
   (sum, salesReturn) =>
     sum + salesReturn.items.reduce(
@@ -1110,11 +1144,14 @@ const detailReturnedCost = detailInvoice?.salesReturns?.reduce(
   0n,
 ) ?? 0n;
 const detailNetProfit = detailInvoice
-  ? BigInt(detailInvoice.total) -
-    BigInt(detailInvoice.extraCosts) -
-    detailCostOfGoodsSold -
-    detailReturnedSales +
-    detailReturnedCost
+  ? calculateSaleNetProfit(
+      BigInt(detailInvoice.subtotal),
+      BigInt(detailInvoice.extraCosts),
+      BigInt(detailInvoice.discount),
+      detailCostOfGoodsSold,
+      detailReturnedSales,
+      detailReturnedCost,
+    )
   : 0n;
   const submitInvoice = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1438,8 +1475,11 @@ const detailNetProfit = detailInvoice
   };
 
   const deleteInvoice = async (invoice: Invoice) => {
-    if (invoice.status !== "DRAFT") return;
-    if (!window.confirm(`پیش‌نویس ${invoice.invoiceNumber} حذف شود؟`)) return;
+    if (invoice.status === "CANCELLED") return;
+    const confirmation = invoice.status === "DRAFT"
+      ? `پیش‌نویس ${invoice.invoiceNumber} حذف شود؟`
+      : `فاکتور صادرشده ${invoice.invoiceNumber} از سوابق فعال حذف و آثار انبار آن معکوس شود؟ مبالغ واقعی دریافتی/پرداختی به‌صورت تراکنش مستقل باقی می‌مانند.`;
+    if (!window.confirm(confirmation)) return;
 
     setSaving(true);
     setError("");
@@ -1449,7 +1489,9 @@ const detailNetProfit = detailInvoice
         method: "DELETE",
       });
       await readResponse(response);
-      setSuccess("پیش‌نویس حذف شد.");
+      setSuccess(invoice.status === "DRAFT"
+        ? "پیش‌نویس حذف شد."
+        : "فاکتور از سوابق فعال حذف و آثار انبار و حسابداری آن اصلاح شد.");
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطا در حذف فاکتور.");
@@ -1914,13 +1956,23 @@ const detailNetProfit = detailInvoice
                           </>
                         )}
                         {!invoice.offlineSyncStatus && invoice.status === "ISSUED" && (
-                          <button
-                            title="ویرایش فاکتور صادرشده"
-                            onClick={() => void openEditInvoice(invoice)}
-                            className="rounded-lg p-2 text-blue-400 hover:bg-blue-500/10"
-                          >
-                            <Pencil size={17} />
-                          </button>
+                          <>
+                            <button
+                              title="ویرایش فاکتور صادرشده"
+                              onClick={() => void openEditInvoice(invoice)}
+                              className="rounded-lg p-2 text-blue-400 hover:bg-blue-500/10"
+                            >
+                              <Pencil size={17} />
+                            </button>
+                            <button
+                              title="حذف فاکتور صادرشده"
+                              disabled={saving}
+                              onClick={() => void deleteInvoice(invoice)}
+                              className="rounded-lg p-2 text-red-400 hover:bg-red-500/10"
+                            >
+                              <Trash2 size={17} />
+                            </button>
+                          </>
                         )}
                         {!invoice.offlineSyncStatus && invoice.status === "ISSUED" && (
                           <button
@@ -2084,13 +2136,11 @@ const detailNetProfit = detailInvoice
                     value={contactSearch}
                     onChange={(event) => setContactSearch(event.target.value)}
                     placeholder="جست‌وجوی مخاطب..."
-                    disabled={editingInvoice?.status === "ISSUED"}
                     className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
                   />
                   <select
                     value={contactId}
                     onChange={(event) => setContactId(event.target.value)}
-                    disabled={editingInvoice?.status === "ISSUED"}
                     className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
                   >
                     <option value="">بدون طرف حساب</option>
@@ -2108,21 +2158,18 @@ const detailNetProfit = detailInvoice
                     <input
                       value={contactSnapshot.name}
                       onChange={(event) => setContactSnapshot((current) => ({ ...current, name: event.target.value }))}
-                      disabled={editingInvoice?.status === "ISSUED"}
                       placeholder="نام مشتری"
                       className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
                     />
                     <input
                       value={contactSnapshot.phone}
                       onChange={(event) => setContactSnapshot((current) => ({ ...current, phone: event.target.value }))}
-                      disabled={editingInvoice?.status === "ISSUED"}
                       placeholder="شماره تماس"
                       className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
                     />
                     <input
                       value={contactSnapshot.address}
                       onChange={(event) => setContactSnapshot((current) => ({ ...current, address: event.target.value }))}
-                      disabled={editingInvoice?.status === "ISSUED"}
                       placeholder="آدرس"
                       className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none focus:border-green-500"
                     />
@@ -2378,6 +2425,24 @@ const detailNetProfit = detailInvoice
                   </span>
                 </div>
               </div>
+              {type === "SALE" && editingInvoice?.status !== "ISSUED" && (
+                <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4">
+                  <div className="flex items-center justify-between gap-4 text-sm">
+                    <span className="font-bold text-slate-200">سود خالص برآوردی</span>
+                    <span className={previewNetProfit >= 0n ? "text-lg font-black text-green-400" : "text-lg font-black text-red-400"}>
+                      {formatMoney(previewNetProfit, currencyUnit)}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">
+                    بر مبنای بهای تمام‌شده میانگین موجودی فعلی و پس از تخفیف و هزینه‌های جانبی.
+                  </p>
+                  {!previewCost.fullyCosted && (
+                    <p className="mt-1 text-xs text-amber-300">
+                      بخشی از تعداد از موجودی فعلی قابل قیمت‌گذاری نیست؛ برآورد پس از تأمین موجودی تغییر می‌کند.
+                    </p>
+                  )}
+                </div>
+              )}
 
               <p className="text-xs leading-6 text-amber-400/80">
                 {type === "PURCHASE"

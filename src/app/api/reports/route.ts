@@ -320,6 +320,7 @@ export async function GET(request: NextRequest) {
             COUNT(*) AS count
           FROM "Invoice"
           WHERE "businessId" = ${businessId}
+            AND "type" = 'SALE'
             AND "status" = 'ISSUED'
             AND "extraCosts" > 0
             AND "invoiceDate" >= ${from}

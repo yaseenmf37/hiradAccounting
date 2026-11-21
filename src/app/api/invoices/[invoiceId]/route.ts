@@ -6,6 +6,11 @@ import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { currencyInputToRial, MAX_CURRENCY_RIAL } from "@/lib/currency";
 import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
+import {
+  calculatePurchaseItemCosts,
+  calculatePercentageDiscount,
+} from "@/lib/invoice-financials";
+import { DELETE as deleteIssuedInvoice } from "./cancel/route";
 
 type RouteContext = {
   params: Promise<{ invoiceId: string }>;
@@ -47,20 +52,6 @@ const invoiceSchema = z.object({
     })
   ).min(1).max(100),
 });
-
-function allocateAmount(amount: bigint, weights: bigint[]) {
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
-  if (weights.length === 0 || totalWeight <= 0n) {
-    throw new Error("INVALID_ALLOCATION");
-  }
-  const allocations = weights.map((weight) => (amount * weight) / totalWeight);
-  let remainder = amount - allocations.reduce((sum, value) => sum + value, 0n);
-  for (let index = 0; remainder > 0n; index = (index + 1) % allocations.length) {
-    allocations[index] += 1n;
-    remainder -= 1n;
-  }
-  return allocations;
-}
 
 function authorize(user: Awaited<ReturnType<typeof getCurrentUser>>) {
   if (!user) {
@@ -505,17 +496,6 @@ export async function PATCH(
       if (editingIssuedInvoice && data.type !== existing.type) {
         throw new Error("ISSUED_TYPE_IMMUTABLE");
       }
-      if (editingIssuedInvoice) {
-        const snapshotValue = (value: string | null | undefined) => value?.trim() || null;
-        const snapshotChanged = !existing.contactId && (
-          snapshotValue(data.contactSnapshot?.name) !== existing.contactNameSnapshot ||
-          snapshotValue(data.contactSnapshot?.phone) !== existing.contactPhoneSnapshot ||
-          snapshotValue(data.contactSnapshot?.address) !== existing.contactAddressSnapshot
-        );
-        if ((data.contactId || null) !== existing.contactId || snapshotChanged) {
-          throw new Error("ISSUED_CONTACT_IMMUTABLE");
-        }
-      }
       if (
         data.payments.length < expectedPaymentMethods.length ||
         data.payments.length > expectedPaymentMethods.length + 1 ||
@@ -633,11 +613,7 @@ export async function PATCH(
       }
       const discountBase = subtotal;
       const discount = discountPercent
-        ? BigInt(new Prisma.Decimal(discountBase.toString())
-            .mul(discountPercent)
-            .div(100)
-            .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
-            .toFixed(0))
+        ? calculatePercentageDiscount(discountBase, discountPercent.toString())
         : currencyInputToRial(data.discount, business.currencyUnit);
       if (discount > discountBase) {
         throw new Error("INVALID_DISCOUNT");
@@ -741,7 +717,7 @@ export async function PATCH(
           const created = await tx.payment.create({
             data: {
               businessId,
-              contactId: existing.contactId,
+              contactId: data.contactId || null,
               invoiceId: existing.id,
               allocationBatchId: replacementBatchId,
               type: existing.type === "SALE" ? "RECEIPT" : "PAYMENT",
@@ -790,6 +766,15 @@ export async function PATCH(
         ) {
           throw new Error("PURCHASE_HISTORY_UNSAFE");
         }
+        const sourceMovementIds = existing.movements
+          .filter((movement) => movement.type === "PURCHASE")
+          .map((movement) => movement.id);
+        if (sourceMovementIds.length > 0) {
+          const allocatedBackorders = await tx.backorderAllocation.count({
+            where: { inventoryMovementId: { in: sourceMovementIds } },
+          });
+          if (allocatedBackorders > 0) throw new Error("PURCHASE_HISTORY_UNSAFE");
+        }
 
         const beforeByProduct = new Map<string, Prisma.Decimal>();
         const beforeCostByProduct = new Map<string, bigint>();
@@ -829,10 +814,7 @@ export async function PATCH(
           }
         }
 
-        const allocation = allocateAmount(
-          subtotal + extraCosts - discount,
-          items.map((item) => item.total),
-        );
+        const allocation = calculatePurchaseItemCosts(items, extraCosts, discount);
         const afterByProduct = new Map<string, Prisma.Decimal>();
         const afterCostByProduct = new Map<string, bigint>();
         const itemCosts = new Map<string, bigint>();
@@ -960,6 +942,9 @@ export async function PATCH(
           discount: existing.discount.toString(),
           description: existing.description,
           contactId: existing.contactId,
+          contactNameSnapshot: existing.contactNameSnapshot,
+          contactPhoneSnapshot: existing.contactPhoneSnapshot,
+          contactAddressSnapshot: existing.contactAddressSnapshot,
           items: existing.items.map((item) => ({
             id: item.id,
             productId: item.productId,
@@ -993,6 +978,9 @@ export async function PATCH(
           discount: discount.toString(),
           description: data.description || null,
           contactId: data.contactId || null,
+          contactNameSnapshot: contactSnapshot?.name ?? null,
+          contactPhoneSnapshot: contactSnapshot?.phone ?? null,
+          contactAddressSnapshot: contactSnapshot?.address ?? null,
           items: items.map((item) => ({
             productId: item.productId,
             quantity: item.quantity.toString(),
@@ -1059,6 +1047,10 @@ export async function PATCH(
             invoiceDate: data.invoiceDate
               ? new Date(`${data.invoiceDate}T00:00:00.000Z`)
               : existing.invoiceDate,
+            contactId: data.contactId || null,
+            contactNameSnapshot: contactSnapshot?.name ?? null,
+            contactPhoneSnapshot: contactSnapshot?.phone ?? null,
+            contactAddressSnapshot: contactSnapshot?.address ?? null,
             description: data.description || null,
             subtotal,
             extraCosts,
@@ -1084,6 +1076,9 @@ export async function PATCH(
           discount: existing.discount.toString(),
           description: existing.description,
           contactId: existing.contactId,
+          contactNameSnapshot: existing.contactNameSnapshot,
+          contactPhoneSnapshot: existing.contactPhoneSnapshot,
+          contactAddressSnapshot: existing.contactAddressSnapshot,
           items: existing.items.map((item) => ({
             id: item.id, productId: item.productId, quantity: item.quantity.toString(),
             unitPrice: item.unitPrice.toString(), total: item.total.toString(),
@@ -1111,6 +1106,9 @@ export async function PATCH(
           discount: discount.toString(),
           description: data.description || null,
           contactId: data.contactId || null,
+          contactNameSnapshot: contactSnapshot?.name ?? null,
+          contactPhoneSnapshot: contactSnapshot?.phone ?? null,
+          contactAddressSnapshot: contactSnapshot?.address ?? null,
           items: items.map((item) => ({
             productId: item.productId, quantity: item.quantity.toString(),
             unitPrice: item.unitPrice.toString(), total: item.total.toString(),
@@ -1325,16 +1323,28 @@ export async function PATCH(
         for (const stale of remainingExisting) {
           await tx.invoiceItem.delete({ where: { id: stale.id } });
         }
+        const costingComplete = [...afterByProduct].every(
+          ([productId, quantity]) =>
+            (revisedCostedQuantityByProduct.get(productId) ?? new Prisma.Decimal(0))
+              .greaterThanOrEqualTo(quantity),
+        );
         return tx.invoice.update({
           where: { id: existing.id },
           data: {
             invoiceDate: data.invoiceDate
               ? new Date(`${data.invoiceDate}T00:00:00.000Z`)
               : existing.invoiceDate,
+            contactId: data.contactId || null,
+            contactNameSnapshot: contactSnapshot?.name ?? null,
+            contactPhoneSnapshot: contactSnapshot?.phone ?? null,
+            contactAddressSnapshot: contactSnapshot?.address ?? null,
             description: data.description || null,
             subtotal, extraCosts, discount, discountPercent,
             reference: existing.type === "SALE" ? data.reference || null : null,
             referenceNumber: existing.type === "SALE" ? data.referenceNumber || null : null,
+            costingRecordedAt: costingComplete
+              ? existing.costingRecordedAt ?? new Date()
+              : null,
             total,
           },
           include: {
@@ -1433,10 +1443,6 @@ export async function PATCH(
         },
         PURCHASE_HISTORY_UNSAFE: {
           message: "به‌دلیل گردش‌های بعدی انبار یا ناهماهنگی سوابق خرید، ویرایش خودکار امن نیست.",
-          status: 409,
-        },
-        ISSUED_CONTACT_IMMUTABLE: {
-          message: "اطلاعات طرف حساب فاکتور صادرشده برای حفظ سابقه قابل تغییر نیست.",
           status: 409,
         },
         INVOICE_HAS_PAYMENTS: {
@@ -1567,7 +1573,7 @@ export async function PATCH(
 
 // حذف پیش‌نویس
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: RouteContext
 ) {
   try {
@@ -1577,6 +1583,13 @@ export async function DELETE(
     if ("error" in auth) return auth.error;
 
     const { invoiceId } = await context.params;
+    const issuedInvoice = await prisma.invoice.findFirst({
+      where: { id: invoiceId, businessId: auth.businessId },
+      select: { status: true },
+    });
+    if (issuedInvoice?.status === "ISSUED") {
+      return deleteIssuedInvoice(request, context);
+    }
 
     await prisma.$transaction(async (tx) => {
       const lockedInvoices = await tx.$queryRaw<{ id: string }[]>`

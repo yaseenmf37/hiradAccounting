@@ -15,6 +15,7 @@
     "test:offline-lifecycle": "tsx --test tests/offline-unlock-lifecycle.test.mjs",
     "test:db-env": "node --test tests/development-database-env.test.mjs",
     "test:invoice-presentation": "tsx --test tests/invoice-presentation.test.mjs",
+    "test:invoice-financials": "tsx --test tests/invoice-financials.test.mjs",
     "test:invoice-print": "tsx --test tests/invoice-print.test.mjs",
     "create-admin": "tsx scripts/create-admin.ts"
   },

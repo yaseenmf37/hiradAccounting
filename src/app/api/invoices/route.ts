@@ -6,11 +6,11 @@ import { z } from "zod";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { currencyInputToRial, MAX_CURRENCY_RIAL } from "@/lib/currency";
+import { calculatePercentageDiscount } from "@/lib/invoice-financials";
 import {
   getCursorPage,
   parseCursorPageParams,
 } from "@/lib/cursor-pagination";
-import { addInventoryStock, reconcileNegativeStockBackorders } from "@/lib/inventory";
 import { issueInvoiceInTransaction } from "@/lib/issue-invoice-transaction";
 
 const amountSchema = z.string().regex(/^\d{1,18}(\.\d)?$/);
@@ -50,21 +50,6 @@ const invoiceSchema = z.object({
   ).min(1).max(100),
 });
 const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS"] as const;
-
-function allocateAmount(amount: bigint, weights: bigint[]) {
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0n);
-  if (weights.length === 0 || totalWeight <= 0n) {
-    throw new Error("INVALID_ALLOCATION");
-  }
-
-  const allocations = weights.map((weight) => (amount * weight) / totalWeight);
-  let remainder = amount - allocations.reduce((sum, value) => sum + value, 0n);
-  for (let index = 0; remainder > 0n; index = (index + 1) % allocations.length) {
-    allocations[index] += 1n;
-    remainder -= 1n;
-  }
-  return allocations;
-}
 
 function authorize(user: Awaited<ReturnType<typeof getCurrentUser>>) {
   if (!user) {
@@ -543,11 +528,7 @@ export async function POST(request: NextRequest) {
 
     const discountBase = subtotal;
     const discount = discountPercent
-      ? BigInt(new Prisma.Decimal(discountBase.toString())
-          .mul(discountPercent)
-          .div(100)
-          .toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
-          .toFixed(0))
+      ? calculatePercentageDiscount(discountBase, discountPercent.toString())
       : currencyInputToRial(data.discount, business.currencyUnit);
 
     if (discount > discountBase) {
@@ -651,116 +632,7 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      if (data.type === "PURCHASE") {
-        const acquisitionCost = subtotal - discount;
-        const discountAllocations = allocateAmount(
-          discount,
-          created.items.map((item) =>
-            BigInt(
-              item.quantity
-                .mul(1000)
-                .toDecimalPlaces(0)
-                .toFixed(0)
-            )
-          )
-        );
-
-        const itemCosts = created.items.map(
-          (item, index) => item.total - discountAllocations[index]
-        );
-
-        if (itemCosts.some((cost) => cost < 0n)) {
-          throw new Error("DISCOUNT_EXCEEDS_ITEM_TOTAL");
-        }
-        const costsByItemId = new Map(
-          created.items.map((item, index) => [item.id, itemCosts[index]]),
-        );
-        const groups = new Map<string, typeof created.items>();
-        for (const item of created.items) {
-          const group = groups.get(item.productId) ?? [];
-          group.push(item);
-          groups.set(item.productId, group);
-        }
-
-        for (const [productId, group] of groups) {
-          const product = await tx.product.findFirst({
-            where: { id: productId, businessId, isActive: true },
-            select: { id: true, stock: true, averageCost: true, inventoryValue: true },
-          });
-          if (!product) throw new Error("PRODUCT_NOT_FOUND");
-
-          const quantity = group.reduce(
-            (sum, item) => sum.add(item.quantity),
-            new Prisma.Decimal(0),
-          );
-          const totalCost = group.reduce(
-            (sum, item) => sum + (costsByItemId.get(item.id) ?? 0n),
-            0n,
-          );
-          const inventory = addInventoryStock(
-            product.stock,
-            product.inventoryValue,
-            quantity,
-            totalCost,
-          );
-          const { stock: newStock, inventoryValue: newInventoryValue, averageCost: newAverageCost } = inventory;
-          if (newInventoryValue > MAX_CURRENCY_RIAL || newInventoryValue < 0n) {
-            throw new Error("INVENTORY_VALUE_OVERFLOW");
-          }
-
-          const updated = await tx.product.updateMany({
-            where: {
-              id: product.id,
-              businessId,
-              isActive: true,
-              stock: product.stock,
-              averageCost: product.averageCost,
-              inventoryValue: product.inventoryValue,
-            },
-            data: {
-              stock: newStock,
-              inventoryValue: newInventoryValue,
-              averageCost: newAverageCost,
-            },
-          });
-          if (updated.count !== 1) throw new Error("STOCK_CONFLICT");
-
-          for (const item of group) {
-            await tx.invoiceItem.update({
-              where: { id: item.id },
-              data: { costOfGoodsSold: costsByItemId.get(item.id) ?? 0n },
-            });
-          }
-
-          const movement = await tx.inventoryMovement.create({
-            data: {
-              businessId,
-              productId,
-              invoiceId: created.id,
-              type: "PURCHASE",
-              quantity,
-              totalCost,
-              averageCost: newAverageCost,
-              description: `صدور فاکتور خرید ${created.invoiceNumber}`,
-            },
-          });
-          await reconcileNegativeStockBackorders(tx, movement);
-        }
-
-        const issued = await tx.invoice.updateMany({
-          where: { id: created.id, businessId, status: "DRAFT" },
-          data: {
-            status: "ISSUED",
-            issuedAt: new Date(),
-          },
-        });
-        if (issued.count !== 1) throw new Error("INVOICE_ALREADY_ISSUED");
-
-        await tx.payment.updateMany({
-          where: { invoiceId: created.id, businessId, status: "PENDING" },
-          data: { status: "CONFIRMED" },
-        });
-      } else if (data.issueImmediately) {
+      if (data.type === "PURCHASE" || data.issueImmediately) {
         await issueInvoiceInTransaction(tx, businessId, created.id);
       }
 
