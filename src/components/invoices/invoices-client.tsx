@@ -476,7 +476,7 @@ export default function InvoicesClient({
   const [extraCosts, setExtraCosts] = useState("0");
   const [discount, setDiscount] = useState("0");
   const [discountPercent, setDiscountPercent] = useState("0");
-  const [discountPercentDirty, setDiscountPercentDirty] = useState(false);
+  const [discountMode, setDiscountMode] = useState<"PERCENT" | "FIXED">("PERCENT");
   const [reference, setReference] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [items, setItems] = useState<FormItem[]>([emptyItem()]);
@@ -821,7 +821,7 @@ export default function InvoicesClient({
     setExtraCosts("0");
     setDiscount("0");
     setDiscountPercent("0");
-    setDiscountPercentDirty(false);
+    setDiscountMode("PERCENT");
     setReference("");
     setReferenceNumber("");
     setItems([emptyItem()]);
@@ -880,17 +880,13 @@ export default function InvoicesClient({
       setDescription(fullInvoice.description ?? "");
       setExtraCosts(rialAmountToInput(fullInvoice.extraCosts, currencyUnit));
       setDiscount(rialAmountToInput(fullInvoice.discount, currencyUnit));
-      const historicalBase = BigInt(fullInvoice.subtotal);
-      const historicalPercent = fullInvoice.discountPercent ?? (
-        historicalBase > 0n
-          ? (() => {
-              const basisPoints = (BigInt(fullInvoice.discount) * 10000n + historicalBase / 2n) / historicalBase;
-              return `${basisPoints / 100n}.${(basisPoints % 100n).toString().padStart(2, "0")}`;
-            })()
-          : "0"
-      );
-      setDiscountPercent(historicalPercent);
-      setDiscountPercentDirty(false);
+      if (fullInvoice.discountPercent !== null && fullInvoice.discountPercent !== undefined) {
+        setDiscountMode("PERCENT");
+        setDiscountPercent(fullInvoice.discountPercent);
+      } else {
+        setDiscountMode("FIXED");
+        setDiscountPercent("0");
+      }
       setReference(fullInvoice.reference ?? "");
       setReferenceNumber(fullInvoice.referenceNumber ?? "");
       setItems(
@@ -1067,10 +1063,12 @@ export default function InvoicesClient({
     [items, currencyUnit],
   );
   const discountBase = subtotal;
-  const calculatedDiscount = percentageDiscountAmount(discountBase, discountPercent);
-  const discountAmount = editingInvoice && !discountPercentDirty && !editingInvoice.discountPercent
-    ? parseCurrencyAmount(discount, currencyUnit) ?? 0n
-    : calculatedDiscount ?? 0n;
+
+  const calculatedDiscount = discountMode === "PERCENT"
+    ? percentageDiscountAmount(discountBase, discountPercent)
+    : parseCurrencyAmount(discount, currencyUnit);
+
+  const discountAmount = calculatedDiscount ?? 0n;
   const finalTotal = subtotal +
     (parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n) -
     discountAmount;
@@ -1140,7 +1138,7 @@ const detailNetProfit = detailInvoice
       }
       if (
         parseCurrencyAmount(extraCosts, currencyUnit) === null ||
-        calculatedDiscount === null ||
+        (discountMode === "PERCENT" && calculatedDiscount === null) ||
         payments.some((payment) => parseCurrencyAmount(payment.amount, currencyUnit) === null)
       ) {
         throw new Error("مبلغ هزینه، تخفیف یا روش پرداخت معتبر نیست.");
@@ -1159,7 +1157,7 @@ const detailNetProfit = detailInvoice
         referenceNumber: type === "SALE" ? referenceNumber.trim() || null : null,
         extraCosts: normalizeDigits(extraCosts || "0"),
         discount: rialAmountToInput(discountAmount.toString(), currencyUnit),
-        discountPercent: !editingInvoice || discountPercentDirty || editingInvoice.discountPercent
+        discountPercent: discountMode === "PERCENT"
           ? normalizeDigits(discountPercent || "0")
           : null,
         items: validItems.map((item) => ({
@@ -1220,7 +1218,9 @@ const detailNetProfit = detailInvoice
             .toString(),
           extraCosts: (parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n).toString(),
           discount: discountAmount.toString(),
-          discountPercent: normalizeDigits(discountPercent || "0"),
+          discountPercent: discountMode === "PERCENT"
+            ? normalizeDigits(discountPercent || "0")
+            : null,
           total: finalTotal.toString(),
           description: description.trim() || null,
           issuedAt: null,
@@ -2236,32 +2236,55 @@ const detailNetProfit = detailInvoice
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
-                <label className="space-y-2 text-sm text-slate-300">
-                  <span>هزینه‌های جانبی ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})</span>
-                  <NumericInput
-                    required
-                    min="0"
-                    step={currencyUnit === "TOMAN" ? "0.1" : "1"}
-                    value={extraCosts}
-                    onChange={(event) => setExtraCosts(event.target.value)}
-                    className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none"
-                  />
-                </label>
-                <label className="space-y-2 text-sm text-slate-300">
-                  <span>تخفیف (درصد)</span>
-                  <NumericInput
-                    min="0"
-                    max="100"
-                    step="0.01"
-                    value={discountPercent}
-                    onChange={(event) => {
-                      setDiscountPercent(event.target.value);
-                      setDiscountPercentDirty(true);
-                    }}
-                    className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none"
-                  />
-                </label>
-              </div>
+  <label className="space-y-2 text-sm text-slate-300">
+    <span>
+      هزینه‌های جانبی ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})
+    </span>
+    <NumericInput
+      required
+      min="0"
+      step={currencyUnit === "TOMAN" ? "0.1" : "1"}
+      value={extraCosts}
+      onChange={(event) => setExtraCosts(event.target.value)}
+      className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none"
+    />
+  </label>
+
+  <div className="space-y-4">
+    <label className="block space-y-2 text-sm text-slate-300">
+      <span>تخفیف (درصد)</span>
+      <NumericInput
+        min="0"
+        max="100"
+        step="0.01"
+        value={discountPercent}
+        onChange={(event) => {
+          setDiscountPercent(event.target.value);
+          setDiscount("0");
+          setDiscountMode("PERCENT");
+        }}
+        className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none"
+      />
+    </label>
+
+    <label className="block space-y-2 text-sm text-slate-300">
+      <span>
+        تخفیف عددی ({currencyUnit === "TOMAN" ? "تومان" : "ریال"})
+      </span>
+      <NumericInput
+        min="0"
+        step={currencyUnit === "TOMAN" ? "0.1" : "1"}
+        value={discount}
+        onChange={(event) => {
+          setDiscount(event.target.value);
+          setDiscountPercent("0");
+          setDiscountMode("FIXED");
+        }}
+        className="w-full rounded-xl border border-[#263341] bg-[#0d141c] p-3 text-white outline-none"
+      />
+    </label>
+  </div>
+</div>
 
               <section className="space-y-3 rounded-xl border border-[#263341] bg-[#0d141c] p-4">
                 <div className="flex items-center justify-between">
