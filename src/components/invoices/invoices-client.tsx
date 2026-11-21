@@ -1114,15 +1114,33 @@ export default function InvoicesClient({
   );
 
   const detailCostOfGoodsSold = detailInvoice?.items.reduce(
-  (sum, item) => sum + BigInt(item.costOfGoodsSold ?? "0"),
-  0n
-) ?? 0n;
-  const detailCostingIncomplete = detailInvoice?.type === "SALE" &&
-    detailInvoice.items.some(
+    (sum, item) => sum + BigInt(item.costOfGoodsSold ?? "0"),
+    0n
+  ) ?? 0n;
+  const detailPreviewCost = detailInvoice?.type === "SALE" &&
+    detailInvoice.status === "DRAFT" &&
+    detailInvoice.items.length > 0 &&
+    detailInvoice.items.every((item) =>
+      products.some((product) => product.id === item.productId)
+    )
+    ? estimateSaleCost(
+        detailInvoice.items.filter((item) => parseQuantityUnits(item.quantity) > 0n),
+        products.map((product) => ({
+          id: product.id,
+          stock: product.stock,
+          averageCost: product.averageCost ?? "0",
+          inventoryValue: product.inventoryValue ?? "0",
+        })),
+      )
+    : null;
+  const detailEffectiveCostOfGoodsSold = detailPreviewCost?.totalCost ?? detailCostOfGoodsSold;
+  const detailCostingIncomplete = detailInvoice?.type === "SALE" && (
+    detailPreviewCost ? !detailPreviewCost.fullyCosted : detailInvoice.items.some(
       (item) =>
         parseQuantityUnits(item.costedQuantity ?? "0") <
         parseQuantityUnits(item.quantity),
-    );
+    )
+  );
 
 const detailReturnedSales = detailInvoice
   ? detailInvoice.salesReturns?.reduce(
@@ -1148,7 +1166,7 @@ const detailNetProfit = detailInvoice
       BigInt(detailInvoice.subtotal),
       BigInt(detailInvoice.extraCosts),
       BigInt(detailInvoice.discount),
-      detailCostOfGoodsSold,
+      detailEffectiveCostOfGoodsSold,
       detailReturnedSales,
       detailReturnedCost,
     )
@@ -2669,7 +2687,7 @@ const detailNetProfit = detailInvoice
                   {detailInvoice.type === "SALE" && (detailInvoice.status === "ISSUED" || detailInvoice.status === "DRAFT") && (                  <>
                     <div className="flex justify-between text-slate-400">
                       <span>بهای تمام‌شده کالاهای فروخته‌شده</span>
-                      <span>{formatMoney(detailCostOfGoodsSold, currencyUnit)}</span>
+                      <span>{formatMoney(detailEffectiveCostOfGoodsSold, currencyUnit)}</span>
                     </div>
                     <div className="flex justify-between border-t border-[#263341] pt-3 font-bold">
                       <span className="text-slate-300">سود خالص پس از تخفیف، هزینه جانبی و مرجوعی</span>
