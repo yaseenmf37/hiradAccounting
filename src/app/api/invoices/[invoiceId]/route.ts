@@ -835,32 +835,8 @@ export async function PATCH(
           ...afterByProduct.keys(),
         ]);
         for (const productId of productIds) {
-          const sourceMovements = existing.movements.filter(
-            (movement) => movement.productId === productId,
-          );
-          const firstSourceMovement = sourceMovements.reduce<Date | null>(
-            (earliest, movement) =>
-              !earliest || movement.createdAt < earliest
-                ? movement.createdAt
-                : earliest,
-            null,
-          );
-          const laterMovement = await tx.inventoryMovement.findFirst({
-            where: {
-              businessId,
-              productId,
-              invoiceId: { not: existing.id },
-              createdAt: { gte: firstSourceMovement ?? existing.issuedAt },
-            },
-            select: { id: true },
-          });
-          if (laterMovement) throw new Error("PURCHASE_HISTORY_UNSAFE");
-
           const oldQuantity = beforeByProduct.get(productId) ?? new Prisma.Decimal(0);
           const oldCost = beforeCostByProduct.get(productId) ?? 0n;
-          if (oldQuantity.greaterThan(0) && sourceMovements.length === 0) {
-            throw new Error("PURCHASE_HISTORY_UNSAFE");
-          }
           const newQuantity = afterByProduct.get(productId) ?? new Prisma.Decimal(0);
           const newCost = afterCostByProduct.get(productId) ?? 0n;
           const product = await tx.product.findFirst({
