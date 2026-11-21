@@ -205,6 +205,11 @@ button {
     overflow-wrap: anywhere;
   }
 
+  .print-invoice-net-profit {
+    font-weight: bold;
+    color: #166534;
+  }
+
   .print-invoice-empty-row td {
     height: 4mm;
   }

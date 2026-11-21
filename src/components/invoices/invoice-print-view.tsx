@@ -3,6 +3,7 @@
 import { formatInvoiceDate } from "@/lib/invoice-dates";
 import {
   allocateInvoiceItemDiscounts,
+  calculateSaleNetProfit,
   formatRialAsToman,
   getPrintEmptyRowCount,
   hasInvoiceDiscount,
@@ -14,6 +15,8 @@ export type InvoicePrintItem = {
   quantity?: string | null;
   unitPrice?: string | null;
   total?: string | null;
+  costOfGoodsSold?: string | null;
+  costedQuantity?: string | null;
   product?: { name: string; unit: string } | null;
 };
 
@@ -47,6 +50,10 @@ export type InvoicePrintData = {
     } | null;
   } | null;
   items?: InvoicePrintItem[] | null;
+  salesReturns?: {
+    total?: string | null;
+    items?: { inventoryCost?: string | null }[] | null;
+  }[] | null;
 };
 
 const moneyFormat = new Intl.NumberFormat("fa-IR");
@@ -89,6 +96,31 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
     discountAmount !== null && hasInvoiceDiscount(discountAmount);
   const extraCostsAmount = parseAmount(invoice.extraCosts);
   const totalAmount = parseAmount(invoice.total);
+  const costOfGoodsSold = items.reduce(
+    (sum, item) => sum + (parseAmount(item.costOfGoodsSold) ?? 0n),
+    0n,
+  );
+  const returnedSales = (invoice.salesReturns ?? []).reduce(
+    (sum, invoiceReturn) => sum + (parseAmount(invoiceReturn.total) ?? 0n),
+    0n,
+  );
+  const returnedCost = (invoice.salesReturns ?? []).reduce(
+    (sum, invoiceReturn) => sum + (invoiceReturn.items ?? []).reduce(
+      (itemSum, item) => itemSum + (parseAmount(item.inventoryCost) ?? 0n),
+      0n,
+    ),
+    0n,
+  );
+  const netProfit = invoice.type === "SALE" && totalAmount !== null
+    ? calculateSaleNetProfit(
+        parseAmount(invoice.subtotal) ?? 0n,
+        extraCostsAmount ?? 0n,
+        discountAmount ?? 0n,
+        costOfGoodsSold,
+        returnedSales,
+        returnedCost,
+      )
+    : null;
   const discountPercent =
     invoice.discountPercent ? formatDiscountPercent(invoice.discountPercent) : "";
   const emptyRowCount = getPrintEmptyRowCount(items.length);
@@ -122,8 +154,7 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
       </h1>
       <header className="print-invoice-header">
         <div className="print-invoice-header-column print-invoice-seller">
-          <p>نام فروشنده: {sellerName || "-"}</p>
-          <p className="whitespace-nowrap">شماره تماس فروشنده: {sellerPhone || "-"}</p>
+            <p className="whitespace-nowrap">{sellerName || "-"} {sellerPhone || "-"}</p>
             <p>نام خریدار: {buyerName || "-"}</p>
             <p>شماره تماس خریدار: {buyerPhone || "-"}</p>
             <p>آدرس خریدار: {buyerAddress || "-"}</p>
@@ -215,6 +246,11 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
               ? "نامشخص"
               : rialAmountToPersianTomanWords(totalAmount)}
           </p>
+          {netProfit !== null && (
+            <p className="print-invoice-net-profit">
+              سود خالص: {formatRialAsToman(netProfit)}
+            </p>
+          )}
         </div>
         <footer className="print-invoice-footer">
           <div className="print-invoice-signatures">

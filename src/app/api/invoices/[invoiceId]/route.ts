@@ -1148,24 +1148,20 @@ export async function PATCH(
           );
         }
         const revisedCostedQuantityByProduct = new Map(costedQuantityByProduct);
-        if (existing.backorders.length > 0) {
-          const beforeLines = existing.items.map((item) => ({
-            productId: item.productId,
-            quantity: item.quantity.toString(),
-          }));
-          const afterLines = items.map((item) => ({
-            productId: item.productId,
-            quantity: item.quantity.toString(),
-          }));
-          if (
-            beforeLines.length !== afterLines.length ||
-            beforeLines.some((line, index) =>
-              line.productId !== afterLines[index]?.productId ||
-              line.quantity !== afterLines[index]?.quantity
-            )
-          ) {
-            throw new Error("BACKORDER_EDIT_LOCKED");
+        for (const backorder of existing.backorders) {
+          const revisedQuantity = afterByProduct.get(backorder.productId) ?? new Prisma.Decimal(0);
+          if (revisedQuantity.lessThan(backorder.fulfilled)) {
+            throw new Error("BACKORDER_HISTORY_UNSAFE");
           }
+          const revisedOutstanding = revisedQuantity.sub(backorder.fulfilled);
+          await tx.backorder.update({
+            where: { id: backorder.id },
+            data: {
+              requested: revisedQuantity,
+              outstanding: revisedOutstanding,
+              cancelledAt: revisedOutstanding.isZero() ? backorder.cancelledAt ?? new Date() : null,
+            },
+          });
         }
         for (const productId of allProductIds) {
           const delta = (afterByProduct.get(productId) ?? new Prisma.Decimal(0))
@@ -1499,6 +1495,10 @@ export async function PATCH(
         },
         BACKORDER_EDIT_LOCKED: {
           message: "مقدار کالای دارای کسری سفارش را نمی‌توان پس از تخصیص تغییر داد؛ برای اصلاح سوابق، ابتدا کسری را تعیین تکلیف کنید.",
+          status: 409,
+        },
+        BACKORDER_HISTORY_UNSAFE: {
+          message: "مقدار فاکتور نمی‌تواند از مقدار کسری تأمین‌شده کمتر باشد؛ ابتدا سوابق تخصیص موجودی را اصلاح کنید.",
           status: 409,
         },
         BUSINESS_NOT_FOUND: {
