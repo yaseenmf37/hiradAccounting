@@ -107,8 +107,7 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
     invoice.business?.owner?.phone2,
   ].filter((phone): phone is string => Boolean(phone)).join("، ");
   const sellerName = invoice.type === "SALE" ? ownerName : contactName;
-  const sellerNameParts = sellerName.trim().split(/\s+/).filter(Boolean);
-  const sellerSurname = sellerNameParts[sellerNameParts.length - 1] ?? "";
+  const sellerSurname = sellerName
   const sellerPhone = invoice.type === "SALE"
     ? ownerPhones || invoice.business?.phone || ""
     : contactPhone;
@@ -127,13 +126,12 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
         <div className="print-invoice-header-column print-invoice-seller">
           {(sellerPhone || sellerSurname) && (
             <p>
-              شماره تماس: {sellerPhone || "—"}
-              {sellerSurname && ` — نام خانوادگی: ${sellerSurname}`}
+              {sellerSurname &&  sellerSurname} {" "} {sellerPhone && sellerPhone} 
             </p>
           )}
-          {buyerName && <p>نام خریدار: {buyerName}</p>}
-          {buyerPhone && <p>شماره تماس خریدار: {buyerPhone}</p>}
-          {buyerAddress && <p>آدرس خریدار: {buyerAddress}</p>}
+            <p>نام خریدار: {buyerName || "-"}</p>
+            <p>شماره تماس خریدار: {buyerPhone || "-"}</p>
+            <p>آدرس خریدار: {buyerAddress || "-"}</p>
         </div>
         <div className="print-invoice-header-column print-invoice-brand">
           {invoice.description && <p>توضیحات فاکتور: {invoice.description}</p>}
