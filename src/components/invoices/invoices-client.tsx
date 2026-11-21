@@ -2666,8 +2666,7 @@ const detailNetProfit = detailInvoice
                   </span>
                   <span>{formatMoney(detailInvoice.discount, currencyUnit)}</span>
                 </div>
-                {detailInvoice.type === "SALE" && detailInvoice.status === "ISSUED" && (
-                  <>
+                  {detailInvoice.type === "SALE" && (detailInvoice.status === "ISSUED" || detailInvoice.status === "DRAFT") && (                  <>
                     <div className="flex justify-between text-slate-400">
                       <span>بهای تمام‌شده کالاهای فروخته‌شده</span>
                       <span>{formatMoney(detailCostOfGoodsSold, currencyUnit)}</span>
