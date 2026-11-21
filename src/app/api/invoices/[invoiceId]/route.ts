@@ -844,20 +844,14 @@ export async function PATCH(
             select: { id: true, stock: true, inventoryValue: true, averageCost: true },
           });
           if (!product) throw new Error("PRODUCT_NOT_FOUND");
-          if (
-            product.stock.lessThan(oldQuantity) ||
-            product.inventoryValue < oldCost
-          ) {
-            throw new Error("PURCHASE_HISTORY_UNSAFE");
-          }
-          const newStock = product.stock.sub(oldQuantity).add(newQuantity);
-          const newInventoryValue = product.inventoryValue - oldCost + newCost;
-          if (
-            newStock.lessThan(0) ||
-            newInventoryValue < 0n ||
-            newInventoryValue > MAX_CURRENCY_RIAL
-          ) {
-            throw new Error("PURCHASE_HISTORY_UNSAFE");
+          const quantityDelta = newQuantity.sub(oldQuantity);
+          const costDelta = newCost - oldCost;
+          const newStock = product.stock.add(quantityDelta);
+          const newInventoryValue = product.inventoryValue + costDelta > 0n
+            ? product.inventoryValue + costDelta
+            : 0n;
+          if (newInventoryValue > MAX_CURRENCY_RIAL) {
+            throw new Error("AMOUNT_OVERFLOW");
           }
           const updated = await tx.product.updateMany({
             where: {
