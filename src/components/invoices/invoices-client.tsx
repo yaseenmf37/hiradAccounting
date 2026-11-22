@@ -191,7 +191,7 @@ type FormItem = {
 };
 
 type PaymentForm = {
-  method: "CASH" | "CHECK" | "CARD_TO_CARD" | "POS" | "LEDGER" | "BANK_TRANSFER";
+  method: "CASH" | "CHECK" | "CARD_TO_CARD" | "POS" | "LEDGER";
   amount: string;
   description: string;
   checkNumber: string;
@@ -202,7 +202,7 @@ type PaymentForm = {
 };
 
 const paymentMethods: PaymentForm["method"][] = [
-  "CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER", "BANK_TRANSFER",
+  "CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER",
 ];
 const paymentMethodLabels: Record<PaymentForm["method"], string> = {
   CASH: "نقدی",
@@ -210,7 +210,6 @@ const paymentMethodLabels: Record<PaymentForm["method"], string> = {
   CARD_TO_CARD: "کارت‌به‌کارت",
   POS: "کارت‌خوان",
   LEDGER: "حساب دفتری",
-  BANK_TRANSFER: "انتقال بانکی",
 };
 function getPaymentDetails(payment: NonNullable<Invoice["payments"]>[number]) {
   return [

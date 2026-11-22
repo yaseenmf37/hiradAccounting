@@ -17,7 +17,7 @@ type RouteContext = {
 };
 
 const amountSchema = z.string().regex(/^\d{1,18}(\.\d)?$/);
-const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS", "BANK_TRANSFER"] as const;
+const expectedPaymentMethods = ["CASH", "CHECK", "CARD_TO_CARD", "POS"] as const;
 
 const invoiceSchema = z.object({
   type: z.enum(["PURCHASE", "SALE"]),
@@ -35,7 +35,7 @@ const invoiceSchema = z.object({
   discount: amountSchema.default("0"),
   discountPercent: z.string().regex(/^\d{1,3}(\.\d{1,2})?$/).nullable().optional(),
   payments: z.array(z.object({
-    method: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER", "BANK_TRANSFER"]),
+    method: z.enum(["CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER"]),
     amount: amountSchema,
     description: z.string().trim().max(1000).nullable().optional(),
     checkNumber: z.string().trim().max(100).nullable().optional(),
@@ -43,7 +43,7 @@ const invoiceSchema = z.object({
     checkDueAt: z.string().date().nullable().optional(),
     payableTo: z.string().trim().max(150).nullable().optional(),
     destinationDetails: z.string().trim().max(300).nullable().optional(),
-  })).max(6).default([]),
+  })).max(5).default([]),
   items: z.array(
     z.object({
       productId: z.string().min(1),
