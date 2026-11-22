@@ -289,6 +289,7 @@ function normalizeDigits(value: string) {
   return value
     .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
     .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[٫،]/g, ".")
     .replace(/[\s,٬]/g, "");
 }
 
@@ -1190,12 +1191,20 @@ const detailNetProfit = detailInvoice
       )) {
         throw new Error("تعداد اقلام باید معتبر باشد و قیمت هر کالا در فاکتور عادی بیشتر از صفر باشد.");
       }
-      if (
-        parseCurrencyAmount(extraCosts, currencyUnit) === null ||
-        (discountMode === "PERCENT" && calculatedDiscount === null) ||
-        payments.some((payment) => parseCurrencyAmount(payment.amount, currencyUnit) === null)
-      ) {
-        throw new Error("مبلغ هزینه، تخفیف یا روش پرداخت معتبر نیست.");
+      if (parseCurrencyAmount(extraCosts, currencyUnit) === null) {
+        throw new Error("مبلغ هزینه جانبی معتبر نیست.");
+      }
+      if (discountMode === "PERCENT" && calculatedDiscount === null) {
+        throw new Error("درصد تخفیف معتبر نیست.");
+      }
+      if (discountMode === "FIXED" && parseCurrencyAmount(discount, currencyUnit) === null) {
+        throw new Error("مبلغ تخفیف معتبر نیست.");
+      }
+      const invalidPayment = payments.find((payment) =>
+        payment.method !== "LEDGER" && parseCurrencyAmount(payment.amount, currencyUnit) === null
+      );
+      if (invalidPayment) {
+        throw new Error(`مبلغ روش پرداخت «${paymentMethodLabels[invalidPayment.method]}» معتبر نیست.`);
       }
 
       const payload = {
@@ -1209,7 +1218,7 @@ const detailNetProfit = detailInvoice
         description: description.trim() || null,
         reference: type === "SALE" ? reference.trim() || null : null,
         referenceNumber: type === "SALE" ? referenceNumber.trim() || null : null,
-        extraCosts: normalizeDigits(extraCosts || "0"),
+        extraCosts: rialAmountToInput((parseCurrencyAmount(extraCosts, currencyUnit) ?? 0n).toString(), currencyUnit),
         discount: rialAmountToInput(discountAmount.toString(), currencyUnit),
         discountPercent: discountMode === "PERCENT"
           ? normalizeDigits(discountPercent || "0")
@@ -1223,7 +1232,7 @@ const detailNetProfit = detailInvoice
           ...payment,
           amount: payment.method === "LEDGER"
             ? "0"
-            : normalizeDigits(payment.amount || "0"),
+            : rialAmountToInput((parseCurrencyAmount(payment.amount, currencyUnit) ?? 0n).toString(), currencyUnit),
           description: payment.description || null,
           checkNumber: payment.checkNumber || null,
           checkIssuedAt: payment.checkIssuedAt || null,
