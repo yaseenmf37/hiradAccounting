@@ -137,7 +137,7 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
     invoice.business?.owner?.phone,
     invoice.business?.owner?.phone2,
   ].filter((phone): phone is string => Boolean(phone)).join("، ");
-  const sellerName = invoice.type === "SALE" ? businessName : contactName;
+  const sellerName = invoice.type === "SALE" ? contactName : businessName;
   const sellerPhone = invoice.type === "SALE"
     ? ownerPhones || invoice.business?.phone || ""
     : contactPhone;
@@ -246,11 +246,6 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
               ? "نامشخص"
               : rialAmountToPersianTomanWords(totalAmount)}
           </p>
-          {netProfit !== null && (
-            <p className="print-invoice-net-profit">
-              سود خالص: {formatRialAsToman(netProfit)}
-            </p>
-          )}
         </div>
         <footer className="print-invoice-footer">
           <div className="print-invoice-signatures">
