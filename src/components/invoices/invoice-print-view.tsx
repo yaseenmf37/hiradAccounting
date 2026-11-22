@@ -133,11 +133,12 @@ export default function InvoicePrintView({ invoice }: { invoice: InvoicePrintDat
   const contactPhone = invoice.contactPhoneSnapshot ?? invoice.contact?.phone ?? "";
   const contactAddress =
     invoice.contactAddressSnapshot ?? invoice.contact?.address ?? "";
+  const ownerName = invoice.business?.owner?.fullName
   const ownerPhones = [
     invoice.business?.owner?.phone,
     invoice.business?.owner?.phone2,
   ].filter((phone): phone is string => Boolean(phone)).join("، ");
-  const sellerName = invoice.type === "SALE" ? contactName : businessName;
+  const sellerName = invoice.type === "SALE" ? ownerName : contactName;
   const sellerPhone = invoice.type === "SALE"
     ? ownerPhones || invoice.business?.phone || ""
     : contactPhone;
