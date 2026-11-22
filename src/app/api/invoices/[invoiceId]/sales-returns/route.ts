@@ -127,41 +127,39 @@ async function findExistingReturn(
   businessId: string,
   idempotencyKey: string,
 ) {
-  const [returns, items, payments] = await Promise.all([
-    client.$queryRaw<ReturnRow[]>`
-      SELECT "id", "invoiceId", "returnNumber", "total", "description", "createdAt"
-      FROM "SalesReturn"
-      WHERE "businessId" = ${businessId} AND "idempotencyKey" = ${idempotencyKey}
-      LIMIT 1
-    `,
-    client.$queryRaw<(ReturnItemRow & { salesReturnId: string })[]>`
-      SELECT item."id", item."salesReturnId", item."invoiceItemId", item."productId",
-        item."quantity", item."amount", item."inventoryCost",
-        product."name" AS "productName", product."unit" AS "productUnit"
-      FROM "SalesReturnItem" item
-      JOIN "Product" product
-        ON product."id" = item."productId" AND product."businessId" = item."businessId"
-      JOIN "SalesReturn" salesReturn
-        ON salesReturn."id" = item."salesReturnId"
-       AND salesReturn."businessId" = item."businessId"
-       AND salesReturn."invoiceId" = item."invoiceId"
-      WHERE salesReturn."businessId" = ${businessId}
-        AND salesReturn."idempotencyKey" = ${idempotencyKey}
-      ORDER BY item."id"
-    `,
-    client.$queryRaw<(ReturnPaymentRow & { salesReturnId: string })[]>`
-      SELECT payment."salesReturnId", payment."method", payment."amount", payment."description",
-        payment."checkNumber", payment."checkIssuedAt", payment."checkDueAt",
-        payment."payableTo", payment."destinationDetails"
-      FROM "Payment" payment
-      JOIN "SalesReturn" salesReturn
-        ON salesReturn."id" = payment."salesReturnId"
-       AND salesReturn."businessId" = payment."businessId"
-      WHERE salesReturn."businessId" = ${businessId}
-        AND salesReturn."idempotencyKey" = ${idempotencyKey}
-      ORDER BY payment."paidAt", payment."id"
-    `,
-  ]);
+  const returns = await client.$queryRaw<ReturnRow[]>`
+    SELECT "id", "invoiceId", "returnNumber", "total", "description", "createdAt"
+    FROM "SalesReturn"
+    WHERE "businessId" = ${businessId} AND "idempotencyKey" = ${idempotencyKey}
+    LIMIT 1
+  `;
+  const items = await client.$queryRaw<(ReturnItemRow & { salesReturnId: string })[]>`
+    SELECT item."id", item."salesReturnId", item."invoiceItemId", item."productId",
+      item."quantity", item."amount", item."inventoryCost",
+      product."name" AS "productName", product."unit" AS "productUnit"
+    FROM "SalesReturnItem" item
+    JOIN "Product" product
+      ON product."id" = item."productId" AND product."businessId" = item."businessId"
+    JOIN "SalesReturn" salesReturn
+      ON salesReturn."id" = item."salesReturnId"
+     AND salesReturn."businessId" = item."businessId"
+     AND salesReturn."invoiceId" = item."invoiceId"
+    WHERE salesReturn."businessId" = ${businessId}
+      AND salesReturn."idempotencyKey" = ${idempotencyKey}
+    ORDER BY item."id"
+  `;
+  const payments = await client.$queryRaw<(ReturnPaymentRow & { salesReturnId: string })[]>`
+    SELECT payment."salesReturnId", payment."method", payment."amount", payment."description",
+      payment."checkNumber", payment."checkIssuedAt", payment."checkDueAt",
+      payment."payableTo", payment."destinationDetails"
+    FROM "Payment" payment
+    JOIN "SalesReturn" salesReturn
+      ON salesReturn."id" = payment."salesReturnId"
+     AND salesReturn."businessId" = payment."businessId"
+    WHERE salesReturn."businessId" = ${businessId}
+      AND salesReturn."idempotencyKey" = ${idempotencyKey}
+    ORDER BY payment."paidAt", payment."id"
+  `;
   const row = returns[0];
   if (!row) return null;
   return {

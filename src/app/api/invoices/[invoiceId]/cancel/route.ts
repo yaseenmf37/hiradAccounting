@@ -45,6 +45,19 @@ async function handleInvoiceAction(
           include: {
             items: true,
             purchaseReturns: { select: { id: true } },
+            salesReturns: {
+              select: {
+                id: true,
+                items: {
+                  select: {
+                    invoiceItemId: true,
+                    productId: true,
+                    quantity: true,
+                    inventoryCost: true,
+                  },
+                },
+              },
+            },
             payments: {
               where: action === "delete"
                 ? { status: { in: [PaymentStatus.CONFIRMED, PaymentStatus.PENDING] } }
@@ -77,15 +90,35 @@ async function handleInvoiceAction(
         if (invoice.type === "PURCHASE" && invoice.purchaseReturns.length > 0) {
           throw new Error("PURCHASE_HAS_RETURNS");
         }
-        if (invoice.type === "SALE") {
-          const salesReturns = await tx.$queryRaw<{ count: bigint }[]>`
-            SELECT COUNT(*) AS count
-            FROM "SalesReturn"
-            WHERE "invoiceId" = ${invoice.id} AND "businessId" = ${businessId}
-          `;
-          if ((salesReturns[0]?.count ?? 0n) > 0n) {
-            throw new Error("SALE_HAS_RETURNS");
+        const returnedByItem = new Map<string, { quantity: Prisma.Decimal; inventoryCost: bigint }>();
+        for (const salesReturn of invoice.salesReturns) {
+          for (const item of salesReturn.items) {
+            const current = returnedByItem.get(item.invoiceItemId);
+            if (current) {
+              current.quantity = current.quantity.add(item.quantity);
+              current.inventoryCost += item.inventoryCost;
+            } else {
+              returnedByItem.set(item.invoiceItemId, {
+                quantity: new Prisma.Decimal(item.quantity),
+                inventoryCost: item.inventoryCost,
+              });
+            }
           }
+        }
+
+        for (const item of invoice.items) {
+          const returned = returnedByItem.get(item.id);
+          if (
+            returned &&
+            (returned.quantity.greaterThan(item.quantity) ||
+              returned.quantity.greaterThan(item.costedQuantity) ||
+              returned.inventoryCost > item.costOfGoodsSold)
+          ) {
+            throw new Error("SALE_RETURN_HISTORY_INVALID");
+          }
+        }
+
+        if (invoice.type === "SALE") {
           await tx.backorder.updateMany({
             where: {
               businessId,
@@ -239,19 +272,34 @@ async function handleInvoiceAction(
                   newInventoryValue.toString()
                 ).div(newStock);
           } else {
-            // Reverse uncosted deficit quantity without assigning it inventory value.
-            totalCost = data.costOfGoodsSold;
+            const returned = [...returnedByItem.entries()]
+              .filter(([itemId]) => invoice.items.some((item) => item.id === itemId && item.productId === productId))
+              .reduce(
+                (sum, [, value]) => ({
+                  quantity: sum.quantity.add(value.quantity),
+                  inventoryCost: sum.inventoryCost + value.inventoryCost,
+                }),
+                { quantity: new Prisma.Decimal(0), inventoryCost: 0n },
+              );
+            const netQuantity = data.quantity.sub(returned.quantity);
+            const netCostedQuantity = data.costedQuantity.sub(returned.quantity);
+            const totalNetCost = data.costOfGoodsSold - returned.inventoryCost;
+            if (netQuantity.lessThan(0) || netCostedQuantity.lessThan(0) || totalNetCost < 0n) {
+              throw new Error("SALE_RETURN_HISTORY_INVALID");
+            }
 
+            // Restore only the sale quantity/cost not already restored by returns.
+            totalCost = totalNetCost;
             const inventoryWithoutCost = addInventoryStock(
               product.stock,
               product.inventoryValue,
-              data.quantity.sub(data.costedQuantity),
+              netQuantity.sub(netCostedQuantity),
               0n,
             );
             const inventory = addInventoryStock(
               inventoryWithoutCost.stock,
               inventoryWithoutCost.inventoryValue,
-              data.costedQuantity,
+              netCostedQuantity,
               totalCost,
             );
             newStock = inventory.stock;
@@ -296,35 +344,51 @@ async function handleInvoiceAction(
             });
             await reconcileNegativeStockBackorders(tx, movement);
           } else if (invoice.type === "SALE") {
-            const uncostedQuantity = data.quantity.sub(data.costedQuantity);
-            if (uncostedQuantity.greaterThan(0)) {
-              await tx.inventoryMovement.create({
-                data: {
-                  businessId,
-                  productId,
-                  invoiceId: invoice.id,
-                  type: "RETURN_IN",
-                  quantity: uncostedQuantity,
-                  totalCost: 0n,
-                  averageCost: newAverageCost,
-                  description: `لغو بخش بهای‌نامشخص فاکتور ${invoice.invoiceNumber}`,
-                },
-              });
+            const returned = [...returnedByItem.entries()]
+              .filter(([itemId]) => invoice.items.some((item) => item.id === itemId && item.productId === productId))
+              .reduce(
+                (sum, [, value]) => ({
+                  quantity: sum.quantity.add(value.quantity),
+                  inventoryCost: sum.inventoryCost + value.inventoryCost,
+                }),
+                { quantity: new Prisma.Decimal(0), inventoryCost: 0n },
+              );
+            const netQuantity = data.quantity.sub(returned.quantity);
+            const netCostedQuantity = data.costedQuantity.sub(returned.quantity);
+            const totalNetCost = data.costOfGoodsSold - returned.inventoryCost;
+            if (netQuantity.lessThan(0) || netCostedQuantity.lessThan(0) || totalNetCost < 0n) {
+              throw new Error("SALE_RETURN_HISTORY_INVALID");
             }
-            if (data.costedQuantity.greaterThan(0)) {
-              const movement = await tx.inventoryMovement.create({
-                data: {
-                  businessId,
-                  productId,
-                  invoiceId: invoice.id,
-                  type: "RETURN_IN",
-                  quantity: data.costedQuantity,
-                  totalCost,
-                  averageCost: newAverageCost,
-                  description: `لغو فاکتور ${invoice.invoiceNumber}`,
-                },
-              });
-              await reconcileNegativeStockBackorders(tx, movement);
+            if (netQuantity.greaterThan(0)) {
+              const netUncostedQuantity = netQuantity.sub(netCostedQuantity);
+              if (netUncostedQuantity.greaterThan(0)) {
+                await tx.inventoryMovement.create({
+                  data: {
+                    businessId,
+                    productId,
+                    invoiceId: invoice.id,
+                    type: "RETURN_IN",
+                    quantity: netUncostedQuantity,
+                    totalCost: 0n,
+                    averageCost: newAverageCost,
+                    description: `لغو بخش بهای‌نامشخص فاکتور ${invoice.invoiceNumber}`,
+                  },
+                });
+              }
+              if (netCostedQuantity.greaterThan(0)) {
+                await tx.inventoryMovement.create({
+                  data: {
+                    businessId,
+                    productId,
+                    invoiceId: invoice.id,
+                    type: "RETURN_IN",
+                    quantity: netCostedQuantity,
+                    totalCost: totalNetCost,
+                    averageCost: newAverageCost,
+                    description: `لغو فاکتور ${invoice.invoiceNumber}`,
+                  },
+                });
+              }
             }
           }
         }
@@ -466,8 +530,8 @@ async function handleInvoiceAction(
           message: "فاکتور خرید دارای مرجوعی است؛ برای حفظ سوابق، ابتدا مرجوعی باید در مسیر اصلاحی جداگانه تعیین تکلیف شود.",
           status: 409,
         },
-        SALE_HAS_RETURNS: {
-          message: "فاکتور فروش دارای مرجوعی است؛ برای حفظ سوابق، لغو مستقیم آن مجاز نیست.",
+        SALE_RETURN_HISTORY_INVALID: {
+          message: "سوابق مرجوعی فاکتور با اقلام اصلی سازگار نیست؛ عملیات برای جلوگیری از خرابی موجودی انجام نشد.",
           status: 409,
         },
         INVOICE_ISSUE_DATE_MISSING: {

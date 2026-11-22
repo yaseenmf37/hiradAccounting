@@ -10,12 +10,16 @@ export function addInventoryStock(
   let inventoryValue: bigint;
 
   if (currentStock.lessThan(0)) {
-    const positiveStock = stock.greaterThan(0) ? stock : new Prisma.Decimal(0);
-    const quantityUnits = BigInt(quantity.mul(1_000_000).toFixed(0));
-    const positiveUnits = BigInt(positiveStock.mul(1_000_000).toFixed(0));
-    inventoryValue = quantityUnits > 0n
-      ? (incomingCost * positiveUnits) / quantityUnits
-      : 0n;
+    if (incomingCost === 0n) {
+      inventoryValue = currentInventoryValue;
+    } else {
+      const positiveStock = stock.greaterThan(0) ? stock : new Prisma.Decimal(0);
+      const quantityUnits = BigInt(quantity.mul(1_000_000).toFixed(0));
+      const positiveUnits = BigInt(positiveStock.mul(1_000_000).toFixed(0));
+      inventoryValue = quantityUnits > 0n
+        ? (incomingCost * positiveUnits) / quantityUnits
+        : 0n;
+    }
   } else {
     inventoryValue = currentInventoryValue + incomingCost;
   }
@@ -145,20 +149,18 @@ export async function reconcileNegativeStockBackorders(
   }
 
   for (const invoiceId of affectedInvoiceIds) {
-    const [remainingBackorders, items] = await Promise.all([
-      tx.backorder.count({
-        where: {
-          invoiceId,
-          cancelledAt: null,
-          outstanding: { gt: 0 },
-          invoice: { is: { type: "SALE", status: "ISSUED" } },
-        },
-      }),
-      tx.invoiceItem.findMany({
-        where: { invoiceId },
-        select: { quantity: true, costedQuantity: true },
-      }),
-    ]);
+    const remainingBackorders = await tx.backorder.count({
+      where: {
+        invoiceId,
+        cancelledAt: null,
+        outstanding: { gt: 0 },
+        invoice: { is: { type: "SALE", status: "ISSUED" } },
+      },
+    });
+    const items = await tx.invoiceItem.findMany({
+      where: { invoiceId },
+      select: { quantity: true, costedQuantity: true },
+    });
 
     if (
       remainingBackorders === 0 &&

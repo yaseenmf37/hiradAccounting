@@ -202,7 +202,7 @@ type PaymentForm = {
 };
 
 const paymentMethods: PaymentForm["method"][] = [
-  "CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER",
+  "CASH", "CHECK", "CARD_TO_CARD", "POS", "LEDGER", "BANK_TRANSFER",
 ];
 const paymentMethodLabels: Record<PaymentForm["method"], string> = {
   CASH: "نقدی",
