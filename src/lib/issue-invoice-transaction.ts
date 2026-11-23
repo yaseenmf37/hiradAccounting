@@ -90,11 +90,17 @@ export async function issueInvoiceInTransaction(
     items.forEach((item, index) => purchaseCosts.set(item.id, allocations[index]));
   }
 
+  // Read the complete product snapshot once. Querying each line/group separately keeps
+  // the serializable transaction open unnecessarily long and makes P2028 much more likely.
+  const productRows = await tx.product.findMany({
+    where: { id: { in: [...groupedItems.keys()] }, businessId, isActive: true },
+    select: { id: true, stock: true, averageCost: true, inventoryValue: true },
+  });
+  const productsById = new Map(productRows.map((product) => [product.id, product]));
+  if (productsById.size !== groupedItems.size) throw new Error("PRODUCT_NOT_FOUND");
+
   for (const [productId, group] of groupedItems) {
-    const product = await tx.product.findFirst({
-      where: { id: productId, businessId, isActive: true },
-      select: { id: true, stock: true, averageCost: true, inventoryValue: true },
-    });
+    const product = productsById.get(productId);
     if (!product) throw new Error("PRODUCT_NOT_FOUND");
 
     let newStock: Prisma.Decimal;
