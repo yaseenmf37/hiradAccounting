@@ -1389,7 +1389,7 @@ export async function PATCH(
           },
         },
       });
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, maxWait: 10000, timeout: 30000 });
 
     return NextResponse.json({
       message: invoice.status === "ISSUED"
