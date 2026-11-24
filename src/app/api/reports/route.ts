@@ -494,7 +494,9 @@ export async function GET(request: NextRequest) {
               ("itemTotal" - "allocatedDiscount")::numeric
               * LEAST("costedQuantity", "quantity") / NULLIF("quantity", 0)
             )) AS "costedSales",
-            SUM("costOfGoodsSold") AS "costOfGoodsSold"
+            SUM("costOfGoodsSold") AS "costOfGoodsSold",
+            SUM(CASE WHEN "costedQuantity" >= "quantity" THEN "costOfGoodsSold" ELSE 0 END) AS "eligibleCostOfGoodsSold",
+            SUM(CASE WHEN "costedQuantity" >= "quantity" THEN "itemTotal" - "allocatedDiscount" ELSE 0 END) AS "eligibleSales"
           FROM item_discount_allocations
           WHERE "invoiceDate" >= ${from}
             AND "invoiceDate" < ${endExclusive}
@@ -561,8 +563,8 @@ export async function GET(request: NextRequest) {
           CASE
             WHEN COALESCE(s."uncostedSales", 0) + COALESCE(r."uncostedSales", 0) > 0 THEN NULL
             ELSE (
-              COALESCE(s."costedSales", 0) - COALESCE(r.amount, 0)
-              - COALESCE(s."costOfGoodsSold", 0) + COALESCE(r.cost, 0)
+              COALESCE(s."eligibleSales", 0) - COALESCE(r.amount, 0)
+              - COALESCE(s."eligibleCostOfGoodsSold", 0) + COALESCE(r.cost, 0)
             )::text
           END AS "grossProfit"
         FROM sales_by_product s
