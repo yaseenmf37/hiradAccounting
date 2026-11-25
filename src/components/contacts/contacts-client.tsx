@@ -45,7 +45,7 @@ import {
 } from "@/lib/offline-storage";
 
 
-type ContactType = "CUSTOMER" | "SUPPLIER" | "BOTH" | "WALK_IN";
+type ContactType = "CUSTOMER" | "SUPPLIER" | "BOTH";
 type FilterType = "ALL" | ContactType;
 
 type Contact = {
@@ -218,7 +218,6 @@ function typeLabel(type: ContactType) {
     CUSTOMER: "مشتری",
     SUPPLIER: "تأمین‌کننده",
     BOTH: "مشتری و تأمین‌کننده",
-    WALK_IN: "مشتریان گذری",
   };
   return labels[type];
 }
@@ -305,7 +304,6 @@ function formatLedgerAmount(amount: string) {
     active: 0,
     customers: 0,
     suppliers: 0,
-    walkIn: 0,
   });
   const debouncedSearch = useDebouncedValue(search);
   const paging = useCursorPage();
@@ -356,7 +354,7 @@ function formatLedgerAmount(amount: string) {
 
       setContacts(data.contacts ?? []);
       setTotalCount(data.total ?? 0);
-      setListStats(data.stats ?? { active: 0, customers: 0, suppliers: 0, walkIn: 0 });
+      setListStats(data.stats ?? { active: 0, customers: 0, suppliers: 0 });
       paging.setNextCursor(data.nextCursor ?? null);
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") return;
@@ -426,10 +424,6 @@ function formatLedgerAmount(amount: string) {
             suppliers: statsContacts.filter((contact) =>
               (statusFilter === "all" || contact.isActive) &&
               (contact.type === "SUPPLIER" || contact.type === "BOTH")
-            ).length,
-            walkIn: statsContacts.filter((contact) =>
-              (statusFilter === "all" || contact.isActive) &&
-              contact.type === "WALK_IN"
             ).length,
           });
           paging.setNextCursor(null);
@@ -1162,7 +1156,6 @@ ledgerPaging.setNextCursor(data.nextCursor ?? null);
                 <option value="CUSTOMER">مشتری</option>
                 <option value="SUPPLIER">تأمین‌کننده</option>
                 <option value="BOTH">مشتری و تأمین‌کننده</option>
-                <option value="WALK_IN">مشتریان گذری</option>
               </select>
             </Field>
 

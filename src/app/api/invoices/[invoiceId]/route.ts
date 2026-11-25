@@ -569,7 +569,7 @@ export async function PATCH(
             businessId,
             isActive: true,
             ...(data.type === "SALE"
-              ? { type: { in: ["CUSTOMER", "BOTH", "WALK_IN"] } }
+              ? { type: { in: ["CUSTOMER", "BOTH"] } }
               : { type: { in: ["SUPPLIER", "BOTH"] } }),
           },
           select: { id: true },
@@ -660,7 +660,21 @@ export async function PATCH(
           : sum + currencyInputToRial(payment.amount, business.currencyUnit),
         0n,
       );
-      if (existing.status !== "DRAFT" && data.type === "SALE" && !data.contactId && immediatelyPaidTotal < total) {
+      if (
+        existing.status !== "DRAFT" &&
+        data.type === "SALE" &&
+        !data.contactId &&
+        immediatelyPaidTotal < total &&
+        immediatelyPaidTotal +
+          data.payments.reduce(
+            (sum, payment) =>
+              payment.method === "CHECK"
+                ? sum + currencyInputToRial(payment.amount, business.currencyUnit)
+                : sum,
+            0n
+          ) <
+          total
+      ) {
         throw new Error("CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT");
       }
       if (editingIssuedInvoice) {

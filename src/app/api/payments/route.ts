@@ -169,6 +169,7 @@ export async function GET(request: NextRequest) {
               type: true,
               status: true,
               total: true,
+              contactNameSnapshot: true,
             },
           },
         },

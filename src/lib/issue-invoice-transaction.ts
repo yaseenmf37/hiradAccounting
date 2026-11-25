@@ -60,7 +60,16 @@ export async function issueInvoiceInTransaction(
         : sum + payment.amount,
     0n
   );
-  if (invoice.type === "SALE" && !invoice.contactId && immediatelyPaidTotal < invoice.total) {
+  const checkTotal = invoice.payments.reduce(
+    (sum, payment) => payment.method === "CHECK" ? sum + payment.amount : sum,
+    0n
+  );
+  if (
+    invoice.type === "SALE" &&
+    !invoice.contactId &&
+    immediatelyPaidTotal < invoice.total &&
+    immediatelyPaidTotal + checkTotal < invoice.total
+  ) {
     throw new Error("CUSTOMER_ACCOUNT_REQUIRED_FOR_DEBT");
   }
 

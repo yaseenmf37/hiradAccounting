@@ -61,6 +61,7 @@ type Invoice = {
   total: string;
   contactId: string | null;
   contact?: { id: string; name: string } | null;
+  contactNameSnapshot?: string | null;
 };
 
 type Payment = {
@@ -90,6 +91,7 @@ type Payment = {
     type: "PURCHASE" | "SALE";
     status: string;
     total: string;
+    contactNameSnapshot?: string | null;
   } | null;
 };
 
@@ -981,7 +983,7 @@ export default function PaymentsClient({
                     </td>
 
                     <td className="px-5 py-4 text-white">
-                      {payment.contact?.name || "بدون طرف حساب"}
+                      {payment.contact?.name || payment.invoice?.contactNameSnapshot || "بدون طرف حساب"}
                     </td>
 
                     <td className="px-5 py-4 font-bold text-white">

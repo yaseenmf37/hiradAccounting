@@ -128,7 +128,6 @@ enum ContactType {
   CUSTOMER
   SUPPLIER
   BOTH
-  WALK_IN
 }
 
 model Invoice {

@@ -30,7 +30,7 @@ async function authorize() {
 const contactSchema = z.object({
   id: z.string().uuid().optional(),
   name: z.string().trim().min(2).max(150),
-  type: z.enum(["CUSTOMER", "SUPPLIER", "BOTH", "WALK_IN"]).default("BOTH"),
+  type: z.enum(["CUSTOMER", "SUPPLIER", "BOTH"]).default("BOTH"),
   phone: z.string().trim().max(30).optional().nullable(),
   email: z.string().trim().email().max(150).optional().nullable(),
   address: z.string().trim().max(1000).optional().nullable(),
@@ -56,7 +56,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const validTypes = ["CUSTOMER", "SUPPLIER", "BOTH", "WALK_IN"];
+    const validTypes = ["CUSTOMER", "SUPPLIER", "BOTH"];
 
     if (type && type !== "ALL" && !validTypes.includes(type)) {
       return NextResponse.json(

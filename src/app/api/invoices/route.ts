@@ -486,7 +486,7 @@ export async function POST(request: NextRequest) {
           businessId,
           isActive: true,
             ...(data.type === "SALE"
-              ? { type: { in: ["CUSTOMER", "BOTH", "WALK_IN"] } }
+              ? { type: { in: ["CUSTOMER", "BOTH"] } }
               : { type: { in: ["SUPPLIER", "BOTH"] } }),
         },
         select: { id: true },
